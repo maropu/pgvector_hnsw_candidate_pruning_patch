@@ -10,7 +10,7 @@ on:
 env:
   PG_MAJOR: "17"
   PGVECTOR_REF: "v0.8.0"
-  PATCH_FILE: "pgvector_v0.8.0_hnsw_pruning.patch"
+  PATCH_FILE: "pgvector_v0.8.0_hnsw_candidate_pruning.patch"
 
 permissions:
   contents: read
@@ -73,7 +73,7 @@ jobs:
       - name: Upload extracted artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: pgvector-${{ env.PGVECTOR_REF }}-pg${{ env.PG_MAJOR }}-linux-amd64
+          name: pgvector-${{ env.PGVECTOR_REF }}-pg${{ env.PG_MAJOR }}-docker-linux-amd64
           path: artifacts
 
       - name: Build out stage to dist or fallback to docker cp
@@ -109,6 +109,7 @@ jobs:
       - name: Upload dist
         uses: actions/upload-artifact@v4
         with:
-          name: pgvector-${{ env.PGVECTOR_REF }}-pg${{ env.PG_MAJOR }}-linux-amd64
+          name: pgvector-${{ env.PGVECTOR_REF }}-pg${{ env.PG_MAJOR }}-docker-linux-amd64
           path: dist
+          overwrite: true
 

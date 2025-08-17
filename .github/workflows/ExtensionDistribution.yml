@@ -1,4 +1,4 @@
-name: Build pgvector w/ candidate pruning (Linux amd64 + macOS amd64/arm64)
+name: Prebuilt binaries (linux/amd64, osx/amd64, and osx/arm64)
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
 env:
   PG_MAJOR: "17"
   PGVECTOR_REF: "v0.8.0"
-  PATCH_FILE: "pgvector_v0.8.0_hnsw_pruning.patch"
+  PATCH_FILE: "pgvector_v0.8.0_hnsw_candidate_pruning.patch"
 
 jobs:
   # ===== Linux (linux/amd64) build =====
