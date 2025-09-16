@@ -42,7 +42,7 @@ $ make install
 ```
 
 Note that **this patch is incompatible with pgvector’s original data structure** because it adds 16 bytes per-neighbor metadata, and
-it currently supports only the L2 distance (vector_l2_ops) on single-precision (float) vectors.
+it currently supports only the L2 distance (vector_l2_ops) on single-precision floating point vectors.
 
 ## Benchmark results
 
