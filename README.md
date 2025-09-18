@@ -41,8 +41,33 @@ $ make
 $ make install
 ```
 
-Note that **this patch is incompatible with pgvector’s original data structure** because it adds 16 bytes per-neighbor metadata, and
+Note that **this patch is incompatible with the pgvector’s original index data format** because it adds 16 bytes per-neighbor metadata, and
 it currently supports only the L2 distance (vector_l2_ops) on single-precision floating point vectors.
+
+### Additional options
+
+#### Index options
+
+Specify HNSW additional one index parameters
+
+- `neighbor_metadata` - whether to store neighbor metadata to estimate distances (on by default)
+
+```sql
+CREATE INDEX ON items USING hnsw (embedding vector_l2_ops) WITH (m = 16, ef_construction = 64, neighbor_metadata = on);
+```
+
+#### Query options
+
+Specify HNSW additional two query parameters
+
+- `hnsw.candidate_pruning` - enables candidate pruning for faster scans (on by default)
+- `hnsw.distance_computation_topk ` - sets the number of neighbors to compute precise distances when using distance estimation (3 by default)
+
+```sql
+SET hnsw.distance_computation_topk = 3;
+```
+
+A higher value provides better recall at the cost of block accesses.
 
 ## Benchmark results
 
