@@ -16,15 +16,18 @@ This becomes a major issue in an RDBMS, where sophisticated concurrency control 
 To mitigate this, the patch embeds metadata into each vertex that allows estimating distances between its neighbors and the query
 without reading the disk blocks containing those neighbors.
 Specifically, Each vertex tuple in a disk block stores 16 bytes of per-neighbor metadata:
-(1) a 64-bit SimHash [3] of the $d$-dimensional edge vector $\Delta = (n - c)$, and (2) the edge length $\lVert \Delta \rVert$ (a double-precision floating-point value).
+(1) a 96-bit SimHash [3] of the $d$-dimensional edge vector $\Delta = (n - c)$, and (2) the edge length $\lVert \Delta \rVert$ (a single-precision floating-point value).
 Here, $c \in \mathbb{R}^d$ is the current vertex vector, $n \in \mathbb{R}^d$ is a neighbor vector, and $q \in \mathbb{R}^d$ is the query vector; let $v = (q - c)$.
 
-At search time, it computes the SimHash of the query vector $v$, estimates the angle $\hat{\theta}$ between $v$ and the edge vector $\Delta$ from their Hamming distance,
-and sorts candidate vertices by estimated distance $\widehat{d}(q,n)$ computed from the cosine theorem. 
-By using this estimated distance $\widehat{d}(q,n)$, the search can prioritize neighbors without fetching the disk blocks that contain their vectors.
+At search time, it computes the SimHash of the query vector $v$ and estimates the angle $\hat{\theta}$ between $v$ and the edge vector $\Delta$ from their Hamming distance.
+It computes all the angles and then sorts neighbor candidates by estimated distance $\widehat{d}(q,n)$ computed from the cosine theorem. 
+By using this estimated distance, the search can prioritize neighbors without fetching the disk blocks that contain their vectors.
 Specifically, candidate neighbors are first sorted in ascending order of $\widehat{d}(q,n)$,
-and only the top-k neighbors (k=3 by default) are accessed from disk to compute their exact distances,
-while the remaining neighbors rely solely on the estimated distances. This strategy results in reducing random I/O and lock contention in PostgreSQL.
+and only the top-k neighbors (k=3 by default) are accessed from other disk blocks to compute their exact distances.
+This strategy implemented in the patch results in reducing random I/O and lock contention in PostgreSQL.
+
+This strategy is similar to the two-level search with hybrid distance [4], but differs in that the latter employs product quantization (PQ) [5] for distance estimation.
+In contrast, the patch adopts SimHash, as its fixed-length bit representation is more compact than the compressed vectors produced by PQ.
 
 Apply the patch to pgvector and compile it as described below:
 
@@ -42,7 +45,7 @@ $ make install
 ```
 
 Note that **this patch is incompatible with the pgvector’s original index data format** because it adds 16 bytes per-neighbor metadata, and
-it currently supports only the L2 distance (vector_l2_ops) on single-precision floating point vectors.
+it currently supports only the L2 distance (vector_l2_ops) on single-precision floating-point vectors.
 
 ### Additional options
 
@@ -78,10 +81,6 @@ in block read while maintaining accuracy, with the benefits observed in the high
 
 <img src="resources/sift1m_recall_blocks_tradeoff.png" width="600">
 
-## Detailed design of this patch
-
-TBW
-
 ## TODO
 
  - Improve the patch to further reduce the number of blocks read
@@ -90,7 +89,9 @@ TBW
 
 ## References
 
- - [1] Yu A. Malkov and D. A. Yashunin, "Efficient and Robust Approximate Nearest Neighbor Search Using Hierarchical Navigable Small World Graphs", IEEE Trans. Pattern Anal. Mach. Intell. 42, 4, 2020.
- - [2] Wen Yang, Tao Li, Gai Fang, and Hong Wei, "PASE: PostgreSQL Ultra-High-Dimensional Approximate Nearest Neighbor Search Extension", In Proceedings of the 2020 ACM SIGMOD International Conference on Management of Data (SIGMOD '20), 2241–2253, 2020.
- - [3] Moses S. Charikar, "Similarity estimation techniques from rounding algorithms", In Proceedings of the thiry-fourth annual ACM symposium on Theory of computing (STOC), 2002.
+ - [1] Yu A. Malkov and D. A. Yashunin. 2020. Efficient and Robust Approximate Nearest Neighbor Search Using Hierarchical Navigable Small World Graphs. IEEE Trans. Pattern Anal. Mach. Intell. 42, 4 (April 2020), 824–836. https://doi.org/10.1109/TPAMI.2018.2889473.
+ - [2] Wen Yang, Tao Li, Gai Fang, and Hong Wei. 2020. PASE: PostgreSQL Ultra-High-Dimensional Approximate Nearest Neighbor Search Extension. In Proceedings of the 2020 ACM SIGMOD International Conference on Management of Data (SIGMOD '20). Association for Computing Machinery, New York, NY, USA, 2241–2253. https://doi.org/10.1145/3318464.3386131.
+ - [3] Moses S. Charikar. 2002. Similarity estimation techniques from rounding algorithms. In Proceedings of the thiry-fourth annual ACM symposium on Theory of computing (STOC '02). Association for Computing Machinery, New York, NY, USA, 380–388. https://doi.org/10.1145/509907.509965.
+ - [4] Yichuan Wang, Shu Liu, Zhifei Li, Yongji Wu, Ziming Mao, Yilong Zhao, Xiao Yan, Zhiying Xu, Yang Zhou, Ion Stoica, Sewon Min, Matei Zaharia, and Joseph E. Gonzalez. 2025. LEANN: A Low-Storage Vector Index. arXiv preprint arXiv:2506.08276.
+ - [5] Herve Jégou, Matthijs Douze, and Cordelia Schmid. 2011. Product Quantization for Nearest Neighbor Search. IEEE Transactions on Pattern Analysis and Machine Intelligence 33, 1 (2011), 117–128.
 
