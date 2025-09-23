@@ -88,6 +88,8 @@ in block read while maintaining accuracy, with the benefits observed in the high
  - Improve the patch to further reduce the number of blocks read
  - Add benchmark results showing the recall-TPS (transactions per second) tradeoff and include them in the section **"Benchmark results"**
  - Document the implementation details and design considerations of this patch in the section **"Detailed design of this patch"**
+ - Implement an alternative candidate pruning strategy using PQ; address the issue that the PQ codebook size (~1KB × dimension) exceeds PostgreSQL’s 8KiB page limit and devise an appropriate solution
+
 
 ## References
 
