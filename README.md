@@ -26,7 +26,7 @@ Specifically, candidate neighbors are first sorted in ascending order of $\wideh
 and only the top-k neighbors (k=3 by default) are accessed from other disk blocks to compute their exact distances.
 This strategy implemented in the patch results in reducing random I/O and lock contention in PostgreSQL.
 
-This strategy is well-known as the two-level search with hybrid distance [4] or the two-stage search strategy [6,7], but differs in that
+This strategy is well-known as the two-level search with hybrid distance [4] or re-ranking [6,7,8], but differs in that
 they employ product quantization (PQ) [5] for distance estimation.
 In contrast, the patch adopts SimHash, as its fixed-length bit representation is more compact and
 computationally lighter than the compressed vectors produced by PQ.
@@ -98,6 +98,7 @@ in block read while maintaining accuracy, with the benefits observed in the high
  - [3] Moses S. Charikar. 2002. Similarity estimation techniques from rounding algorithms. In Proceedings of the thiry-fourth annual ACM symposium on Theory of computing (STOC '02). Association for Computing Machinery, New York, NY, USA, 380–388. https://doi.org/10.1145/509907.509965.
  - [4] Yichuan Wang, Shu Liu, Zhifei Li, Yongji Wu, Ziming Mao, Yilong Zhao, Xiao Yan, Zhiying Xu, Yang Zhou, Ion Stoica, Sewon Min, Matei Zaharia, and Joseph E. Gonzalez. 2025. LEANN: A Low-Storage Vector Index. arXiv preprint arXiv:2506.08276.
  - [5] Herve Jégou, Matthijs Douze, and Cordelia Schmid. 2011. Product Quantization for Nearest Neighbor Search. IEEE Transactions on Pattern Analysis and Machine Intelligence 33, 1 (2011), 117–128.
- - [6] M. Douze, A. Sablayrolles and H. Jégou, "Link and Code: Fast Indexing with Graphs and Compact Regression Codes," 2018 IEEE/CVF Conference on Computer Vision and Pattern Recognition, Salt Lake City, UT, USA, 2018, pp. 3646-3654, doi: 10.1109/CVPR.2018.00384.
- - [7] H. Jégou, R. Tavenard, M. Douze and L. Amsaleg, "Searching in one billion vectors: Re-rank with source coding," 2011 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP), Prague, Czech Republic, 2011, pp. 861-864, doi: 10.1109/ICASSP.2011.5946540.
+ - [6] Matthijs Douze, Alexandre Sablayrolles, and Hervé Jégou. 2018. Link and Code: Fast Indexing with Graphs and Compact Regression Codes. In Proceedings of the 2018 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR 2018). IEEE, 3646–3654. https://doi.org/10.1109/CVPR.2018.00384.
+ - [7] Hervé Jégou, Romain Tavenard, Matthijs Douze, and Laurent Amsaleg. 2011. Searching in one billion vectors: Re-rank with source coding. In Proceedings of the 2011 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP 2011). IEEE, 861–864. https://doi.org/10.1109/ICASSP.2011.5946540.
+ - [8] Herve Jégou, Matthijs Douze, and Cordelia Schmid. 2011. Product Quantization for Nearest Neighbor Search. IEEE Transactions on Pattern Analysis and Machine Intelligence 33, 1 (2011), 117–128. https://doi.org/10.1109/TPAMI.2010.57.
 
