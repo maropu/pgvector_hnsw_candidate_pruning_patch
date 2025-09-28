@@ -22,9 +22,9 @@ def plot_results():
     
     # Plot results
     plt.plot(recall_vanilla, blocks_vanilla, marker='s', color="black", linewidth=2, label="vanilla pgvector")
-    plt.plot(recall_k7, blocks_k7, marker='o', color="tab:blue", label="w/patch(k=7)")
-    plt.plot(recall_k5, blocks_k5, marker='^', color="tab:green", label="w/patch(k=5)")
     plt.plot(recall_k3, blocks_k3, marker='v', color="tab:orange", label="w/patch(k=3)")
+    plt.plot(recall_k5, blocks_k5, marker='^', color="tab:green", label="w/patch(k=5)")
+    plt.plot(recall_k7, blocks_k7, marker='o', color="tab:blue", label="w/patch(k=7)")
 
     plt.xlabel("Recall")
     plt.ylabel("#Blocks")
