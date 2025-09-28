@@ -24,80 +24,6 @@ index 8c62f9d..6185597 100644
  HEADERS = src\halfvec.h src\sparsevec.h src\vector.h
  
  REGRESS = bit btree cast copy halfvec hnsw_bit hnsw_halfvec hnsw_sparsevec hnsw_vector ivfflat_bit ivfflat_halfvec ivfflat_vector sparsevec vector_type
-diff --git a/src/bitutils.c b/src/bitutils.c
-index 578bcad..394c8fa 100644
---- a/src/bitutils.c
-+++ b/src/bitutils.c
-@@ -168,6 +168,23 @@ BitJaccardDistanceAvx512Popcount(uint32 bytes, unsigned char *ax, unsigned char
- #define TARGET_XSAVE __attribute__((target("xsave")))
- #endif
- 
-+#if defined(__APPLE__) && defined(__x86_64__)
-+static inline uint64_t xgetbv(uint32_t index) {
-+  uint32_t eax, edx;
-+  __asm__ volatile (
-+    "xgetbv"
-+    : "=a"(eax), "=d"(edx)
-+    : "c"(index)
-+  );
-+  return ((uint64_t)edx << 32) | eax;
-+}
-+#else
-+#include <immintrin.h>
-+static inline uint64_t xgetbv(uint32_t index) {
-+  return _xgetbv(index);
-+}
-+#endif
-+
- TARGET_XSAVE static bool
- SupportsAvx512Popcount()
- {
-@@ -184,7 +201,7 @@ SupportsAvx512Popcount()
- 		return false;
- 
- 	/* Check XMM, YMM, and ZMM registers are enabled */
--	if ((_xgetbv(0) & 0xe6) != 0xe6)
-+	if ((xgetbv(0) & 0xe6) != 0xe6)
- 		return false;
- 
- #if defined(USE__GET_CPUID)
-diff --git a/src/halfutils.c b/src/halfutils.c
-index d169094..eb462f4 100644
---- a/src/halfutils.c
-+++ b/src/halfutils.c
-@@ -249,6 +249,23 @@ HalfvecL1DistanceF16c(int dim, half * ax, half * bx)
- #define TARGET_XSAVE __attribute__((target("xsave")))
- #endif
- 
-+#if defined(__APPLE__) && defined(__x86_64__)
-+static inline uint64_t xgetbv(uint32_t index) {
-+  uint32_t eax, edx;
-+  __asm__ volatile (
-+    "xgetbv"
-+    : "=a"(eax), "=d"(edx)
-+    : "c"(index)
-+  );
-+  return ((uint64_t)edx << 32) | eax;
-+}
-+#else
-+#include <immintrin.h>
-+static inline uint64_t xgetbv(uint32_t index) {
-+  return _xgetbv(index);
-+}
-+#endif
-+
- TARGET_XSAVE static bool
- SupportsCpuFeature(unsigned int feature)
- {
-@@ -265,7 +282,7 @@ SupportsCpuFeature(unsigned int feature)
- 		return false;
- 
- 	/* Check XMM and YMM registers are enabled */
--	if ((_xgetbv(0) & 6) != 6)
-+	if ((xgetbv(0) & 6) != 6)
- 		return false;
- 
- 	/* Now check features */
 diff --git a/src/hnsw.c b/src/hnsw.c
 index 5bfc619..f1293c6 100644
 --- a/src/hnsw.c
@@ -144,7 +70,7 @@ index 5bfc619..f1293c6 100644
  
  	return (bytea *) build_reloptions(reloptions, validate,
 diff --git a/src/hnsw.h b/src/hnsw.h
-index 1fb0c24..47d45bc 100644
+index 1fb0c24..3ae066f 100644
 --- a/src/hnsw.h
 +++ b/src/hnsw.h
 @@ -37,15 +37,22 @@
@@ -281,7 +207,7 @@ index 1fb0c24..47d45bc 100644
 +	void		(*updateCenter) (Pointer v, int dimensions, float *x);
 +	void		(*sumCenter) (Pointer v, float *x);
 +	void		(*setNeighborMetadata)(char *dst, Datum v, void * metastate, HnswSupport * support);
-+	void		(*estimateDistances)(Datum q, int dimensions, HnswNeighborEntry entries, int *unvisitedIndexes, int count, void * metastate, HnswSupport * support);
++	void		(*estimateDistances)(Datum q, HnswNeighborEntry entries, int *unvisitedIndexes, int count, void * metastate, HnswSupport * support);
 +}			HnswTypeInfo;
 +
  typedef struct HnswQuery
@@ -973,10 +899,10 @@ index a5fac4e..19b16e4 100644
  	MemoryContextSwitchTo(oldCtx);
 diff --git a/src/hnswmeta.c b/src/hnswmeta.c
 new file mode 100644
-index 0000000..b42fe9b
+index 0000000..212c60f
 --- /dev/null
 +++ b/src/hnswmeta.c
-@@ -0,0 +1,787 @@
+@@ -0,0 +1,785 @@
 +#include "postgres.h"
 +
 +#include <float.h>
@@ -1336,8 +1262,8 @@ index 0000000..b42fe9b
 +			float	   *dstData = dstVec->x;
 +
 +			/* Set vector header */
-+			SET_VARSIZE(dstVec, buildstate->typeInfo->itemSize(metastate->subvectorDim));
-+			dstVec->dim = metastate->subvectorDim;
++			SET_VARSIZE(dstVec, itemSize);
++			dstVec->dim = subvectorDim;
 +
 +			/* Copy actual data */
 +			for (int d = 0; d < subvectorDim; d++)
@@ -1465,6 +1391,7 @@ index 0000000..b42fe9b
 +
 +		/* Update subvector dimension and copy data */
 +		sv->dim = subvectorDim;
++
 +		for (int d = 0; d < subvectorDim; d++)
 +			sv->x[d] = vec->x[startDim + d];
 +
@@ -1496,13 +1423,7 @@ index 0000000..b42fe9b
 +
 +void
 +HnswSetVectorL2NeighborMetadata(char *dst, Datum v, void * metastate, HnswSupport * support) {
-+	if (DatumGetPointer(v) == NULL)
-+	{
-+		/* Set metadata to all zeros for NULL vector */
-+		memset(dst, 0, HNSW_NEIGHBOR_VECTOR_L2_METADATA_BYTES);
-+		return;
-+	}
-+
++	Assert(DatumGetPointer(v) != NULL);
 +	PQEncodeVector((uint8 *) dst, v, metastate, support);
 +}
 +
@@ -1532,11 +1453,14 @@ index 0000000..b42fe9b
 +}
 +
 +void
-+HnswEstimateVectorL2Distances(Datum q, int dimensions, HnswNeighborEntry entries, int *unvisitedIndexes, int count, void * metastate, HnswSupport * support) {
++HnswEstimateVectorL2Distances(Datum q, HnswNeighborEntry entries, int *unvisitedIndexes, int count, void * metastate, HnswSupport * support) {
 +	uint8	encoded[HNSW_NEIGHBOR_VECTOR_L2_METADATA_BYTES];
++	Vector *qv = DatumGetVector(q);
 +	Vector *decoded;
 +
-+	decoded = InitVector(dimensions);
++	Assert(qv != NULL);
++
++	decoded = InitVector(qv->dim);
 +
 +	for (int i = 0; i < count; i++)
 +	{
@@ -1767,7 +1691,7 @@ index 0000000..b42fe9b
 \ No newline at end of file
 diff --git a/src/hnswmeta.h b/src/hnswmeta.h
 new file mode 100644
-index 0000000..96a4f9a
+index 0000000..e14f3e6
 --- /dev/null
 +++ b/src/hnswmeta.h
 @@ -0,0 +1,53 @@
@@ -1811,7 +1735,7 @@ index 0000000..96a4f9a
 +/* Methods */
 +bool	HnswIsVectorL2Distance(FmgrInfo * distanceProcinfo);
 +void	HnswSetVectorL2NeighborMetadata(char *dst, Datum v, void * metastate, HnswSupport * support);
-+void	HnswEstimateVectorL2Distances(Datum q, int dimensions, HnswNeighborEntry entries, int *unvisitedIndexes, int count, void * metastate, HnswSupport * support);
++void	HnswEstimateVectorL2Distances(Datum q, HnswNeighborEntry entries, int *unvisitedIndexes, int count, void * metastate, HnswSupport * support);
 +Size	HnswVectorItemSize(int dimensions);
 +void	HnswVectorUpdateCenter(Pointer v, int dimensions, float *x);
 +void	HnswVectorSumCenter(Pointer v, float *x);
@@ -1824,6 +1748,13 @@ index 0000000..96a4f9a
 +HnswNeighborMetadataState *HnswLoadNeighborMetadataStateFromDisk(Relation index);
 +
 +#endif
+diff --git a/src/hnswpq.c b/src/hnswpq.c
+new file mode 100644
+index 0000000..71b2f35
+--- /dev/null
++++ b/src/hnswpq.c
+@@ -0,0 +1 @@
++#include "postgres.h"
 diff --git a/src/hnswscan.c b/src/hnswscan.c
 index 955998a..7bcffbd 100644
 --- a/src/hnswscan.c
@@ -1878,7 +1809,7 @@ index 955998a..7bcffbd 100644
  	 * Use a lower max allocation size than default to allow scanning more
  	 * tuples for iterative search before exceeding work_mem
 diff --git a/src/hnswutils.c b/src/hnswutils.c
-index 7afed25..0bd73c7 100644
+index 7afed25..3dc538a 100644
 --- a/src/hnswutils.c
 +++ b/src/hnswutils.c
 @@ -1,5 +1,6 @@
@@ -2005,7 +1936,7 @@ index 7afed25..0bd73c7 100644
  	int			start;
  
  	buf = ReadBuffer(index, element->neighborPage);
-@@ -773,37 +832,160 @@ HnswLoadNeighborTids(HnswElement element, ItemPointerData *indextids, Relation i
+@@ -773,37 +832,158 @@ HnswLoadNeighborTids(HnswElement element, ItemPointerData *indextids, Relation i
  
  	/* Copy to minimize lock time */
  	start = (element->level - lc) * m;
@@ -2049,13 +1980,11 @@ index 7afed25..0bd73c7 100644
 +EstimateAndSortDistancesFromMetadata(char *base, HnswElement element, HnswQuery * q, Relation index, const HnswTypeInfo * typeInfo, HnswSupport * support, void * metastate, HnswNeighborEntryData *entries, int *unvisitedIndexes, int *unvisitedLength)
 +{
 +	int maxNeighborEntries;
-+	int dimensions;
 +
 +	if (*unvisitedLength == 0)
 +		return;
 +
 +	maxNeighborEntries = unvisitedIndexes[(*unvisitedLength) - 1] + 1;
-+	dimensions = TupleDescAttr(index->rd_att, 0)->atttypmod;
 +
 +	/*
 +	 * Initialize with DBL_MAX so that unused entries are placed
@@ -2065,7 +1994,7 @@ index 7afed25..0bd73c7 100644
 +		entries[i].distance = DBL_MAX;
 +
 +	/* Estimate distances from neighbor metadata */
-+	typeInfo->estimateDistances(q->value, dimensions, entries, unvisitedIndexes, *unvisitedLength, metastate, support);
++	typeInfo->estimateDistances(q->value, entries, unvisitedIndexes, *unvisitedLength, metastate, support);
 +
 +	/* Sort distances in ascending order for processing prioritization */
 +	qsort(entries, maxNeighborEntries, sizeof(HnswNeighborEntryData), CompareNearestNeighborEntries);
@@ -2174,7 +2103,7 @@ index 7afed25..0bd73c7 100644
  	}
  }
  
-@@ -811,11 +993,12 @@ HnswLoadUnvisitedFromDisk(HnswElement element, HnswUnvisited * unvisited, int *u
+@@ -811,11 +991,12 @@ HnswLoadUnvisitedFromDisk(HnswElement element, HnswUnvisited * unvisited, int *u
   * Algorithm 2 from paper
   */
  List *
@@ -2188,7 +2117,7 @@ index 7afed25..0bd73c7 100644
  	int			wlen = 0;
  	visited_hash vh;
  	ListCell   *lc2;
-@@ -825,6 +1008,10 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
+@@ -825,6 +1006,10 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
  	HnswUnvisited *unvisited = palloc(lm * sizeof(HnswUnvisited));
  	int			unvisitedLength;
  	bool		inMemory = index == NULL;
@@ -2199,7 +2128,7 @@ index 7afed25..0bd73c7 100644
  
  	if (v == NULL)
  	{
-@@ -847,6 +1034,9 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
+@@ -847,6 +1032,9 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
  		localNeighborhood = palloc(neighborhoodSize);
  	}
  
@@ -2209,7 +2138,7 @@ index 7afed25..0bd73c7 100644
  	/* Add entry points to v, C, and W */
  	foreach(lc2, ep)
  	{
-@@ -883,12 +1073,26 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
+@@ -883,12 +1071,26 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
  		if (c->distance > f->distance)
  			break;
  
@@ -2237,7 +2166,7 @@ index 7afed25..0bd73c7 100644
  
  		/* OK to count elements instead of tuples */
  		if (tuples != NULL)
-@@ -910,7 +1114,7 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
+@@ -910,7 +1112,7 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
  			}
  			else
  			{
@@ -2246,7 +2175,7 @@ index 7afed25..0bd73c7 100644
  				BlockNumber blkno = ItemPointerGetBlockNumber(indextid);
  				OffsetNumber offno = ItemPointerGetOffsetNumber(indextid);
  
-@@ -943,23 +1147,62 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
+@@ -943,23 +1145,62 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
  			pairingheap_add(C, &e->c_node);
  			pairingheap_add(W, &e->w_node);
  
@@ -2324,7 +2253,7 @@ index 7afed25..0bd73c7 100644
  			}
  		}
  	}
-@@ -1267,7 +1510,7 @@ PrecomputeHash(char *base, HnswElement element)
+@@ -1267,7 +1508,7 @@ PrecomputeHash(char *base, HnswElement element)
   * Algorithm 1 from paper
   */
  void
@@ -2333,7 +2262,7 @@ index 7afed25..0bd73c7 100644
  {
  	List	   *ep;
  	List	   *w;
-@@ -1294,7 +1537,7 @@ HnswFindElementNeighbors(char *base, HnswElement element, HnswElement entryPoint
+@@ -1294,7 +1535,7 @@ HnswFindElementNeighbors(char *base, HnswElement element, HnswElement entryPoint
  	/* 1st phase: greedy search to insert level */
  	for (int lc = entryLevel; lc >= level + 1; lc--)
  	{
@@ -2342,7 +2271,7 @@ index 7afed25..0bd73c7 100644
  		ep = w;
  	}
  
-@@ -1313,7 +1556,7 @@ HnswFindElementNeighbors(char *base, HnswElement element, HnswElement entryPoint
+@@ -1313,7 +1554,7 @@ HnswFindElementNeighbors(char *base, HnswElement element, HnswElement entryPoint
  		List	   *lw = NIL;
  		ListCell   *lc2;
  
@@ -2351,7 +2280,7 @@ index 7afed25..0bd73c7 100644
  
  		/* Convert search candidates to candidates */
  		foreach(lc2, w)
-@@ -1370,13 +1613,44 @@ HnswGetTypeInfo(Relation index)
+@@ -1370,13 +1611,44 @@ HnswGetTypeInfo(Relation index)
  
  	if (procinfo == NULL)
  	{
@@ -2402,7 +2331,7 @@ index 7afed25..0bd73c7 100644
  	}
  	else
  		return (const HnswTypeInfo *) DatumGetPointer(FunctionCall0Coll(procinfo, InvalidOid));
-@@ -1389,7 +1663,13 @@ hnsw_halfvec_support(PG_FUNCTION_ARGS)
+@@ -1389,7 +1661,13 @@ hnsw_halfvec_support(PG_FUNCTION_ARGS)
  	static const HnswTypeInfo typeInfo = {
  		.maxDimensions = HNSW_MAX_DIM * 2,
  		.normalize = halfvec_l2_normalize,
@@ -2417,7 +2346,7 @@ index 7afed25..0bd73c7 100644
  	};
  
  	PG_RETURN_POINTER(&typeInfo);
-@@ -1402,7 +1682,13 @@ hnsw_bit_support(PG_FUNCTION_ARGS)
+@@ -1402,7 +1680,13 @@ hnsw_bit_support(PG_FUNCTION_ARGS)
  	static const HnswTypeInfo typeInfo = {
  		.maxDimensions = HNSW_MAX_DIM * 32,
  		.normalize = NULL,
@@ -2432,7 +2361,7 @@ index 7afed25..0bd73c7 100644
  	};
  
  	PG_RETURN_POINTER(&typeInfo);
-@@ -1415,7 +1701,13 @@ hnsw_sparsevec_support(PG_FUNCTION_ARGS)
+@@ -1415,7 +1699,13 @@ hnsw_sparsevec_support(PG_FUNCTION_ARGS)
  	static const HnswTypeInfo typeInfo = {
  		.maxDimensions = SPARSEVEC_MAX_DIM,
  		.normalize = sparsevec_l2_normalize,
@@ -2709,6 +2638,50 @@ index 4b6d14f..60a4016 100644
  
  	CheckCenters(index, centers, typeInfo);
  
+diff --git a/test/expected/hnsw_vector.out b/test/expected/hnsw_vector.out
+index 29ea724..a81a24f 100644
+--- a/test/expected/hnsw_vector.out
++++ b/test/expected/hnsw_vector.out
+@@ -3,6 +3,9 @@ SET enable_seqscan = off;
+ CREATE TABLE t (val vector(3));
+ INSERT INTO t (val) VALUES ('[0,0,0]'), ('[1,2,3]'), ('[1,1,1]'), (NULL);
+ CREATE INDEX ON t USING hnsw (val vector_l2_ops);
++NOTICE:  hnsw index metadata created with little data
++DETAIL:  This will cause low recall.
++HINT:  Drop the index until the table has more data.
+ INSERT INTO t (val) VALUES ('[1,2,4]');
+ SELECT * FROM t ORDER BY val <-> '[3,3,3]';
+    val   
+@@ -26,6 +29,9 @@ SELECT COUNT(*) FROM t;
+ (1 row)
+ 
+ TRUNCATE t;
++NOTICE:  hnsw index metadata created with little data
++DETAIL:  This will cause low recall.
++HINT:  Drop the index until the table has more data.
+ SELECT * FROM t ORDER BY val <-> '[3,3,3]';
+  val 
+ -----
+@@ -104,6 +110,9 @@ DROP TABLE t;
+ CREATE TABLE t (val vector(3));
+ INSERT INTO t (val) VALUES ('[0,0,0]'), ('[1,2,3]'), ('[1,1,1]'), (NULL);
+ CREATE INDEX ON t USING hnsw (val vector_l2_ops);
++NOTICE:  hnsw index metadata created with little data
++DETAIL:  This will cause low recall.
++HINT:  Drop the index until the table has more data.
+ SET hnsw.iterative_scan = strict_order;
+ SET hnsw.ef_search = 1;
+ SELECT * FROM t ORDER BY val <-> '[3,3,3]';
+@@ -130,6 +139,9 @@ DROP TABLE t;
+ CREATE UNLOGGED TABLE t (val vector(3));
+ INSERT INTO t (val) VALUES ('[0,0,0]'), ('[1,2,3]'), ('[1,1,1]'), (NULL);
+ CREATE INDEX ON t USING hnsw (val vector_l2_ops);
++NOTICE:  hnsw index metadata created with little data
++DETAIL:  This will cause low recall.
++HINT:  Drop the index until the table has more data.
+ SELECT * FROM t ORDER BY val <-> '[3,3,3]';
+    val   
+ ---------
 diff --git a/test/t/017_hnsw_filtering.pl b/test/t/017_hnsw_filtering.pl
 index afa2a1c..00b6a9d 100644
 --- a/test/t/017_hnsw_filtering.pl
