@@ -81,7 +81,7 @@ At Recall≈0.95, the patch achieved a reduction in block accesses of approximat
 where block accesses were reduced by about 72% for k=3, 68% for k=5, and 64% for k=7. These results indicate that the patch provides a consistent reduction
 in block read while maintaining accuracy, with the benefits observed in the high-recall regime.
 
-<img src="resources/sift1m_recall_blocks_tradeoff.png" width="600">
+<img src="resources/sift1m_simhash_recall_blocks_tradeoff.png" width="600">
 
 ## TODO
 

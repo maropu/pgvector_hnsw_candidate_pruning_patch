@@ -24,6 +24,80 @@ index 8c62f9d..6185597 100644
  HEADERS = src\halfvec.h src\sparsevec.h src\vector.h
  
  REGRESS = bit btree cast copy halfvec hnsw_bit hnsw_halfvec hnsw_sparsevec hnsw_vector ivfflat_bit ivfflat_halfvec ivfflat_vector sparsevec vector_type
+diff --git a/src/bitutils.c b/src/bitutils.c
+index 578bcad..394c8fa 100644
+--- a/src/bitutils.c
++++ b/src/bitutils.c
+@@ -168,6 +168,23 @@ BitJaccardDistanceAvx512Popcount(uint32 bytes, unsigned char *ax, unsigned char
+ #define TARGET_XSAVE __attribute__((target("xsave")))
+ #endif
+ 
++#if defined(__APPLE__) && defined(__x86_64__)
++static inline uint64_t xgetbv(uint32_t index) {
++  uint32_t eax, edx;
++  __asm__ volatile (
++    "xgetbv"
++    : "=a"(eax), "=d"(edx)
++    : "c"(index)
++  );
++  return ((uint64_t)edx << 32) | eax;
++}
++#else
++#include <immintrin.h>
++static inline uint64_t xgetbv(uint32_t index) {
++  return _xgetbv(index);
++}
++#endif
++
+ TARGET_XSAVE static bool
+ SupportsAvx512Popcount()
+ {
+@@ -184,7 +201,7 @@ SupportsAvx512Popcount()
+ 		return false;
+ 
+ 	/* Check XMM, YMM, and ZMM registers are enabled */
+-	if ((_xgetbv(0) & 0xe6) != 0xe6)
++	if ((xgetbv(0) & 0xe6) != 0xe6)
+ 		return false;
+ 
+ #if defined(USE__GET_CPUID)
+diff --git a/src/halfutils.c b/src/halfutils.c
+index d169094..eb462f4 100644
+--- a/src/halfutils.c
++++ b/src/halfutils.c
+@@ -249,6 +249,23 @@ HalfvecL1DistanceF16c(int dim, half * ax, half * bx)
+ #define TARGET_XSAVE __attribute__((target("xsave")))
+ #endif
+ 
++#if defined(__APPLE__) && defined(__x86_64__)
++static inline uint64_t xgetbv(uint32_t index) {
++  uint32_t eax, edx;
++  __asm__ volatile (
++    "xgetbv"
++    : "=a"(eax), "=d"(edx)
++    : "c"(index)
++  );
++  return ((uint64_t)edx << 32) | eax;
++}
++#else
++#include <immintrin.h>
++static inline uint64_t xgetbv(uint32_t index) {
++  return _xgetbv(index);
++}
++#endif
++
+ TARGET_XSAVE static bool
+ SupportsCpuFeature(unsigned int feature)
+ {
+@@ -265,7 +282,7 @@ SupportsCpuFeature(unsigned int feature)
+ 		return false;
+ 
+ 	/* Check XMM and YMM registers are enabled */
+-	if ((_xgetbv(0) & 6) != 6)
++	if ((xgetbv(0) & 6) != 6)
+ 		return false;
+ 
+ 	/* Now check features */
 diff --git a/src/hnsw.c b/src/hnsw.c
 index 5bfc619..f1293c6 100644
 --- a/src/hnsw.c
@@ -899,10 +973,10 @@ index a5fac4e..19b16e4 100644
  	MemoryContextSwitchTo(oldCtx);
 diff --git a/src/hnswmeta.c b/src/hnswmeta.c
 new file mode 100644
-index 0000000..fa6a49b
+index 0000000..b42fe9b
 --- /dev/null
 +++ b/src/hnswmeta.c
-@@ -0,0 +1,781 @@
+@@ -0,0 +1,787 @@
 +#include "postgres.h"
 +
 +#include <float.h>
@@ -1422,8 +1496,14 @@ index 0000000..fa6a49b
 +
 +void
 +HnswSetVectorL2NeighborMetadata(char *dst, Datum v, void * metastate, HnswSupport * support) {
-+	HnswNeighborMetadataState *state = (HnswNeighborMetadataState *) metastate;
-+	PQEncodeVector((uint8 *) dst, v, state, support);
++	if (DatumGetPointer(v) == NULL)
++	{
++		/* Set metadata to all zeros for NULL vector */
++		memset(dst, 0, HNSW_NEIGHBOR_VECTOR_L2_METADATA_BYTES);
++		return;
++	}
++
++	PQEncodeVector((uint8 *) dst, v, metastate, support);
 +}
 +
 +static void
@@ -1745,7 +1825,7 @@ index 0000000..96a4f9a
 +
 +#endif
 diff --git a/src/hnswscan.c b/src/hnswscan.c
-index 955998a..9a45bcb 100644
+index 955998a..7bcffbd 100644
 --- a/src/hnswscan.c
 +++ b/src/hnswscan.c
 @@ -2,6 +2,7 @@
@@ -1783,7 +1863,7 @@ index 955998a..9a45bcb 100644
  	}
  
 -	return HnswSearchLayer(base, &so->q, ep, batch_size, 0, index, &so->support, so->m, false, NULL, &so->v, &so->discarded, false, &so->tuples);
-+	return HnswSearchLayer(base, &so->q, ep, batch_size, 0, index, so->typeInfo, &so->support, so->m, false, NULL, &so->v, &so->discarded, false, &so->tuples, false, NULL);
++	return HnswSearchLayer(base, &so->q, ep, batch_size, 0, index, so->typeInfo, &so->support, so->m, false, NULL, &so->v, &so->discarded, false, &so->tuples, true, so->neighborMetadataState);
  }
  
  /*
