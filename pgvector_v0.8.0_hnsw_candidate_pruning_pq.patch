@@ -70,7 +70,7 @@ index 5bfc619..f1293c6 100644
  
  	return (bytea *) build_reloptions(reloptions, validate,
 diff --git a/src/hnsw.h b/src/hnsw.h
-index 1fb0c24..3ae066f 100644
+index 1fb0c24..63e84d5 100644
 --- a/src/hnsw.h
 +++ b/src/hnsw.h
 @@ -37,15 +37,22 @@
@@ -239,7 +239,7 @@ index 1fb0c24..3ae066f 100644
  	/* Memory */
  	MemoryContext graphCtx;
  	MemoryContext tmpCtx;
-@@ -312,6 +364,13 @@ typedef struct HnswMetaPageData
+@@ -312,6 +364,16 @@ typedef struct HnswMetaPageData
  	OffsetNumber entryOffno;
  	int16		entryLevel;
  	BlockNumber insertPage;
@@ -250,10 +250,13 @@ index 1fb0c24..3ae066f 100644
 +	uint16		neighborMetadataPageCount;	/* number of pages used by metadata */
 +	uint16		pqSubvectorDim;				/* PQ subvector dimension */
 +	uint16		pqM;						/* PQ number of subvectors */
++
++	/* Dynamic head page position */
++	BlockNumber headBlkno;					/* actual first element page */
  }			HnswMetaPageData;
  
  typedef HnswMetaPageData * HnswMetaPage;
-@@ -344,11 +403,22 @@ typedef struct HnswNeighborTupleData
+@@ -344,11 +406,22 @@ typedef struct HnswNeighborTupleData
  	uint8		type;
  	uint8		version;
  	uint16		count;
@@ -277,7 +280,7 @@ index 1fb0c24..3ae066f 100644
  typedef union
  {
  	struct pointerhash_hash *pointers;
-@@ -359,7 +429,7 @@ typedef union
+@@ -359,7 +432,7 @@ typedef union
  typedef union
  {
  	HnswElement element;
@@ -286,7 +289,7 @@ index 1fb0c24..3ae066f 100644
  }			HnswUnvisited;
  
  typedef struct HnswScanOpaqueData
-@@ -378,6 +448,9 @@ typedef struct HnswScanOpaqueData
+@@ -378,6 +451,9 @@ typedef struct HnswScanOpaqueData
  
  	/* Support functions */
  	HnswSupport support;
@@ -296,7 +299,7 @@ index 1fb0c24..3ae066f 100644
  }			HnswScanOpaqueData;
  
  typedef HnswScanOpaqueData * HnswScanOpaque;
-@@ -397,6 +470,9 @@ typedef struct HnswVacuumState
+@@ -397,6 +473,9 @@ typedef struct HnswVacuumState
  	/* Support functions */
  	HnswSupport support;
  
@@ -306,7 +309,7 @@ index 1fb0c24..3ae066f 100644
  	/* Variables */
  	struct tidhash_hash *deleted;
  	BufferAccessStrategy bas;
-@@ -410,6 +486,7 @@ typedef struct HnswVacuumState
+@@ -410,6 +489,7 @@ typedef struct HnswVacuumState
  /* Methods */
  int			HnswGetM(Relation index);
  int			HnswGetEfConstruction(Relation index);
@@ -314,13 +317,14 @@ index 1fb0c24..3ae066f 100644
  FmgrInfo   *HnswOptionalProcInfo(Relation index, uint16 procnum);
  void		HnswInitSupport(HnswSupport * support, Relation index);
  Datum		HnswNormValue(const HnswTypeInfo * typeInfo, Oid collation, Datum value);
-@@ -417,27 +494,27 @@ bool		HnswCheckNorm(HnswSupport * support, Datum value);
+@@ -417,27 +497,28 @@ bool		HnswCheckNorm(HnswSupport * support, Datum value);
  Buffer		HnswNewBuffer(Relation index, ForkNumber forkNum);
  void		HnswInitPage(Buffer buf, Page page);
  void		HnswInit(void);
 -List	   *HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation index, HnswSupport * support, int m, bool inserting, HnswElement skipElement, visited_hash * v, pairingheap **discarded, bool initVisited, int64 *tuples);
 +List	   *HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation index, const HnswTypeInfo * typeInfo, HnswSupport * support, int m, bool inserting, HnswElement skipElement, visited_hash * v, pairingheap **discarded, bool initVisited, int64 *tuples, bool estimateDistances, void * metastate);
  HnswElement HnswGetEntryPoint(Relation index);
++BlockNumber	HnswGetHeadBlockNumber(Relation index);
  void		HnswGetMetaPageInfo(Relation index, int *m, HnswElement * entryPoint);
  void	   *HnswAlloc(HnswAllocator * allocator, Size size);
  HnswElement HnswInitElement(char *base, ItemPointer tid, int m, double ml, int maxLevel, HnswAllocator * alloc);
@@ -349,7 +353,7 @@ index 1fb0c24..3ae066f 100644
  const		HnswTypeInfo *HnswGetTypeInfo(Relation index);
  PGDLLEXPORT void HnswParallelBuildMain(dsm_segment *seg, shm_toc *toc);
 diff --git a/src/hnswbuild.c b/src/hnswbuild.c
-index b667478..7da379c 100644
+index b667478..35db5d6 100644
 --- a/src/hnswbuild.c
 +++ b/src/hnswbuild.c
 @@ -47,6 +47,7 @@
@@ -374,11 +378,10 @@ index b667478..7da379c 100644
  
  /*
   * Create the metapage
-@@ -96,6 +98,27 @@ CreateMetaPage(HnswBuildState * buildstate)
- 	metap->entryOffno = InvalidOffsetNumber;
- 	metap->entryLevel = -1;
- 	metap->insertPage = InvalidBlockNumber;
-+
+@@ -99,6 +101,33 @@ CreateMetaPage(HnswBuildState * buildstate)
+ 	((PageHeader) page)->pd_lower =
+ 		((char *) metap + sizeof(HnswMetaPageData)) - (char *) page;
+ 
 +	/* Set neighbor metadata information */
 +	if (buildstate->neighborMetadataState != NULL)
 +	{
@@ -389,6 +392,9 @@ index b667478..7da379c 100644
 +
 +		/* Create centroid pages and record start page number */
 +		metap->neighborMetadataStartBlkno = HnswCreateCodebookPages(buildstate, metastate, &metap->neighborMetadataPageCount);
++
++		/* Calculate head page position after metadata pages */
++		metap->headBlkno = metap->neighborMetadataStartBlkno + metap->neighborMetadataPageCount;
 +	}
 +	else
 +	{
@@ -397,12 +403,16 @@ index b667478..7da379c 100644
 +		metap->neighborMetadataPageCount = 0;
 +		metap->pqSubvectorDim = 0;
 +		metap->pqM = 0;
++
++		/* Use traditional head page position */
++		metap->headBlkno = HNSW_HEAD_BLKNO;
 +	}
 +
- 	((PageHeader) page)->pd_lower =
- 		((char *) metap + sizeof(HnswMetaPageData)) - (char *) page;
- 
-@@ -139,6 +162,8 @@ CreateGraphPages(HnswBuildState * buildstate)
++
+ 	MarkBufferDirty(buf);
+ 	UnlockReleaseBuffer(buf);
+ }
+@@ -139,6 +168,8 @@ CreateGraphPages(HnswBuildState * buildstate)
  {
  	Relation	index = buildstate->index;
  	ForkNumber	forkNum = buildstate->forkNum;
@@ -411,7 +421,7 @@ index b667478..7da379c 100644
  	Size		maxSize;
  	HnswElementTuple etup;
  	HnswNeighborTuple ntup;
-@@ -177,7 +202,7 @@ CreateGraphPages(HnswBuildState * buildstate)
+@@ -177,7 +208,7 @@ CreateGraphPages(HnswBuildState * buildstate)
  
  		/* Calculate sizes */
  		etupSize = HNSW_ELEMENT_TUPLE_SIZE(VARSIZE_ANY(valuePtr));
@@ -420,7 +430,7 @@ index b667478..7da379c 100644
  		combinedSize = etupSize + ntupSize + sizeof(ItemIdData);
  
  		/* Initial size check */
-@@ -242,6 +267,9 @@ WriteNeighborTuples(HnswBuildState * buildstate)
+@@ -242,6 +273,9 @@ WriteNeighborTuples(HnswBuildState * buildstate)
  {
  	Relation	index = buildstate->index;
  	ForkNumber	forkNum = buildstate->forkNum;
@@ -430,7 +440,7 @@ index b667478..7da379c 100644
  	int			m = buildstate->m;
  	HnswElementPtr iter = buildstate->graph->head;
  	char	   *base = buildstate->hnswarea;
-@@ -255,7 +283,7 @@ WriteNeighborTuples(HnswBuildState * buildstate)
+@@ -255,7 +289,7 @@ WriteNeighborTuples(HnswBuildState * buildstate)
  		HnswElement element = HnswPtrAccess(base, iter);
  		Buffer		buf;
  		Page		page;
@@ -439,7 +449,7 @@ index b667478..7da379c 100644
  
  		/* Update iterator */
  		iter = element->next;
-@@ -271,7 +299,7 @@ WriteNeighborTuples(HnswBuildState * buildstate)
+@@ -271,7 +305,7 @@ WriteNeighborTuples(HnswBuildState * buildstate)
  		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
  		page = BufferGetPage(buf);
  
@@ -448,7 +458,7 @@ index b667478..7da379c 100644
  
  		if (!PageIndexTupleOverwrite(page, element->neighborOffno, (Item) ntup, ntupSize))
  			elog(ERROR, "failed to add index item to \"%s\"", RelationGetRelationName(index));
-@@ -425,6 +453,7 @@ static void
+@@ -425,6 +459,7 @@ static void
  InsertTupleInMemory(HnswBuildState * buildstate, HnswElement element)
  {
  	HnswGraph  *graph = buildstate->graph;
@@ -456,7 +466,7 @@ index b667478..7da379c 100644
  	HnswSupport *support = &buildstate->support;
  	HnswElement entryPoint;
  	LWLock	   *entryLock = &graph->entryLock;
-@@ -457,7 +486,7 @@ InsertTupleInMemory(HnswBuildState * buildstate, HnswElement element)
+@@ -457,7 +492,7 @@ InsertTupleInMemory(HnswBuildState * buildstate, HnswElement element)
  	}
  
  	/* Find neighbors for element */
@@ -465,7 +475,7 @@ index b667478..7da379c 100644
  
  	/* Update graph in memory */
  	UpdateGraphInMemory(support, element, m, efConstruction, entryPoint, buildstate);
-@@ -497,7 +526,7 @@ InsertTuple(Relation index, Datum *values, bool *isnull, ItemPointer heaptid, Hn
+@@ -497,7 +532,7 @@ InsertTuple(Relation index, Datum *values, bool *isnull, ItemPointer heaptid, Hn
  	{
  		LWLockRelease(flushLock);
  
@@ -474,7 +484,7 @@ index b667478..7da379c 100644
  	}
  
  	/*
-@@ -529,7 +558,7 @@ InsertTuple(Relation index, Datum *values, bool *isnull, ItemPointer heaptid, Hn
+@@ -529,7 +564,7 @@ InsertTuple(Relation index, Datum *values, bool *isnull, ItemPointer heaptid, Hn
  
  		LWLockRelease(flushLock);
  
@@ -483,7 +493,7 @@ index b667478..7da379c 100644
  	}
  
  	/* Ok, we can proceed to allocate the element */
-@@ -664,6 +693,7 @@ InitBuildState(HnswBuildState * buildstate, Relation heap, Relation index, Index
+@@ -664,6 +699,7 @@ InitBuildState(HnswBuildState * buildstate, Relation heap, Relation index, Index
  
  	buildstate->m = HnswGetM(index);
  	buildstate->efConstruction = HnswGetEfConstruction(index);
@@ -491,7 +501,7 @@ index b667478..7da379c 100644
  	buildstate->dimensions = TupleDescAttr(index->rd_att, 0)->atttypmod;
  
  	/* Disallow varbit since require fixed dimensions */
-@@ -699,6 +729,11 @@ InitBuildState(HnswBuildState * buildstate, Relation heap, Relation index, Index
+@@ -699,6 +735,11 @@ InitBuildState(HnswBuildState * buildstate, Relation heap, Relation index, Index
  	buildstate->ml = HnswGetMl(buildstate->m);
  	buildstate->maxLevel = HnswGetMaxLevel(buildstate->m);
  
@@ -503,7 +513,7 @@ index b667478..7da379c 100644
  	buildstate->graphCtx = GenerationContextCreate(CurrentMemoryContext,
  												   "Hnsw build graph context",
  #if PG_VERSION_NUM >= 150000
-@@ -722,6 +757,9 @@ InitBuildState(HnswBuildState * buildstate, Relation heap, Relation index, Index
+@@ -722,6 +763,9 @@ InitBuildState(HnswBuildState * buildstate, Relation heap, Relation index, Index
  static void
  FreeBuildState(HnswBuildState * buildstate)
  {
@@ -513,7 +523,7 @@ index b667478..7da379c 100644
  	MemoryContextDelete(buildstate->graphCtx);
  	MemoryContextDelete(buildstate->tmpCtx);
  }
-@@ -763,7 +801,7 @@ ParallelHeapScan(HnswBuildState * buildstate)
+@@ -763,7 +807,7 @@ ParallelHeapScan(HnswBuildState * buildstate)
   * Perform a worker's portion of a parallel insert
   */
  static void
@@ -522,7 +532,7 @@ index b667478..7da379c 100644
  {
  	HnswBuildState buildstate;
  	TableScanDesc scan;
-@@ -776,6 +814,18 @@ HnswParallelScanAndInsert(Relation heapRel, Relation indexRel, HnswShared * hnsw
+@@ -776,6 +820,18 @@ HnswParallelScanAndInsert(Relation heapRel, Relation indexRel, HnswShared * hnsw
  	InitBuildState(&buildstate, heapRel, indexRel, indexInfo, MAIN_FORKNUM);
  	buildstate.graph = &hnswshared->graphData;
  	buildstate.hnswarea = hnswarea;
@@ -541,7 +551,7 @@ index b667478..7da379c 100644
  	InitAllocator(&buildstate.allocator, &HnswSharedMemoryAlloc, &buildstate);
  	scan = table_beginscan_parallel(heapRel,
  									ParallelTableScanFromHnswShared(hnswshared));
-@@ -844,7 +894,7 @@ HnswParallelBuildMain(dsm_segment *seg, shm_toc *toc)
+@@ -844,7 +900,7 @@ HnswParallelBuildMain(dsm_segment *seg, shm_toc *toc)
  	hnswarea = shm_toc_lookup(toc, PARALLEL_KEY_HNSW_AREA, false);
  
  	/* Perform inserts */
@@ -550,7 +560,7 @@ index b667478..7da379c 100644
  
  	/* Close relations within worker */
  	index_close(indexRel, indexLockmode);
-@@ -871,9 +921,14 @@ HnswEndParallel(HnswLeader * hnswleader)
+@@ -871,9 +927,14 @@ HnswEndParallel(HnswLeader * hnswleader)
   * Return size of shared memory required for parallel index build
   */
  static Size
@@ -567,7 +577,7 @@ index b667478..7da379c 100644
  }
  
  /*
-@@ -885,7 +940,7 @@ HnswLeaderParticipateAsWorker(HnswBuildState * buildstate)
+@@ -885,7 +946,7 @@ HnswLeaderParticipateAsWorker(HnswBuildState * buildstate)
  	HnswLeader *hnswleader = buildstate->hnswleader;
  
  	/* Perform work common to all participants */
@@ -576,7 +586,7 @@ index b667478..7da379c 100644
  }
  
  /*
-@@ -898,6 +953,7 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
+@@ -898,6 +959,7 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
  	Snapshot	snapshot;
  	Size		esthnswshared;
  	Size		esthnswarea;
@@ -584,7 +594,7 @@ index b667478..7da379c 100644
  	Size		estother;
  	HnswShared *hnswshared;
  	char	   *hnswarea;
-@@ -921,9 +977,14 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
+@@ -921,9 +983,14 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
  		snapshot = RegisterSnapshot(GetTransactionSnapshot());
  
  	/* Estimate size of workspaces */
@@ -600,7 +610,7 @@ index b667478..7da379c 100644
  	/* Leave space for other objects in shared memory */
  	/* Docker has a default limit of 64 MB for shm_size */
  	/* which happens to be the default value of maintenance_work_mem */
-@@ -933,7 +994,7 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
+@@ -933,7 +1000,7 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
  		esthnswarea -= estother;
  
  	shm_toc_estimate_chunk(&pcxt->estimator, esthnswarea);
@@ -609,7 +619,7 @@ index b667478..7da379c 100644
  
  	/* Finally, estimate PARALLEL_KEY_QUERY_TEXT space */
  	if (debug_query_string)
-@@ -964,6 +1025,22 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
+@@ -964,6 +1031,22 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
  	hnswshared->heaprelid = RelationGetRelid(buildstate->heap);
  	hnswshared->indexrelid = RelationGetRelid(buildstate->index);
  	hnswshared->isconcurrent = isconcurrent;
@@ -632,7 +642,7 @@ index b667478..7da379c 100644
  	ConditionVariableInit(&hnswshared->workersdonecv);
  	SpinLockInit(&hnswshared->mutex);
  	/* Initialize mutable state */
-@@ -1102,6 +1179,10 @@ BuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
+@@ -1102,6 +1185,10 @@ BuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
  
  	InitBuildState(buildstate, heap, index, indexInfo, forkNum);
  
@@ -1809,7 +1819,7 @@ index 955998a..7bcffbd 100644
  	 * Use a lower max allocation size than default to allow scanning more
  	 * tuples for iterative search before exceeding work_mem
 diff --git a/src/hnswutils.c b/src/hnswutils.c
-index 7afed25..3dc538a 100644
+index 7afed25..fc269f3 100644
 --- a/src/hnswutils.c
 +++ b/src/hnswutils.c
 @@ -1,5 +1,6 @@
@@ -1827,7 +1837,37 @@ index 7afed25..3dc538a 100644
  #include "lib/pairingheap.h"
  #include "sparsevec.h"
  #include "storage/bufmgr.h"
-@@ -447,7 +449,7 @@ HnswSetElementTuple(char *base, HnswElementTuple etup, HnswElement element)
+@@ -334,6 +336,29 @@ HnswGetEntryPoint(Relation index)
+ 	return entryPoint;
+ }
+ 
++/*
++ * Get head block number from meta page
++ */
++BlockNumber
++HnswGetHeadBlockNumber(Relation index)
++{
++	Buffer		buf;
++	Page		page;
++	HnswMetaPage metap;
++	BlockNumber headBlkno;
++
++	buf = ReadBuffer(index, HNSW_METAPAGE_BLKNO);
++	LockBuffer(buf, BUFFER_LOCK_SHARE);
++	page = BufferGetPage(buf);
++	metap = HnswPageGetMeta(page);
++
++	headBlkno = metap->headBlkno;
++
++	UnlockReleaseBuffer(buf);
++
++	return headBlkno;
++}
++
+ /*
+  * Update the metapage info
+  */
+@@ -447,7 +472,7 @@ HnswSetElementTuple(char *base, HnswElementTuple etup, HnswElement element)
   * Set neighbor tuple
   */
  void
@@ -1836,7 +1876,7 @@ index 7afed25..3dc538a 100644
  {
  	int			idx = 0;
  
-@@ -460,7 +462,8 @@ HnswSetNeighborTuple(char *base, HnswNeighborTuple ntup, HnswElement e, int m)
+@@ -460,7 +485,8 @@ HnswSetNeighborTuple(char *base, HnswNeighborTuple ntup, HnswElement e, int m)
  
  		for (int i = 0; i < lm; i++)
  		{
@@ -1846,7 +1886,7 @@ index 7afed25..3dc538a 100644
  
  			if (i < neighbors->length)
  			{
-@@ -468,6 +471,12 @@ HnswSetNeighborTuple(char *base, HnswNeighborTuple ntup, HnswElement e, int m)
+@@ -468,6 +494,12 @@ HnswSetNeighborTuple(char *base, HnswNeighborTuple ntup, HnswElement e, int m)
  				HnswElement hce = HnswPtrAccess(base, hc->element);
  
  				ItemPointerSet(indextid, hce->blkno, hce->offno);
@@ -1859,7 +1899,7 @@ index 7afed25..3dc538a 100644
  			}
  			else
  				ItemPointerSetInvalid(indextid);
-@@ -570,6 +579,43 @@ HnswLoadElement(HnswElement element, double *distance, HnswQuery * q, Relation i
+@@ -570,6 +602,43 @@ HnswLoadElement(HnswElement element, double *distance, HnswQuery * q, Relation i
  	HnswLoadElementImpl(element->blkno, element->offno, distance, q, index, support, loadVec, maxDistance, &element);
  }
  
@@ -1903,7 +1943,7 @@ index 7afed25..3dc538a 100644
  /*
   * Get the distance for an element
   */
-@@ -594,6 +640,17 @@ HnswInitSearchCandidate(char *base, HnswElement element, double distance)
+@@ -594,6 +663,17 @@ HnswInitSearchCandidate(char *base, HnswElement element, double distance)
  	return sc;
  }
  
@@ -1921,7 +1961,7 @@ index 7afed25..3dc538a 100644
  /*
   * Create a candidate for the entry point
   */
-@@ -748,11 +805,13 @@ HnswLoadUnvisitedFromMemory(char *base, HnswElement element, HnswUnvisited * unv
+@@ -748,11 +828,13 @@ HnswLoadUnvisitedFromMemory(char *base, HnswElement element, HnswUnvisited * unv
   * Load neighbor index TIDs
   */
  bool
@@ -1936,7 +1976,7 @@ index 7afed25..3dc538a 100644
  	int			start;
  
  	buf = ReadBuffer(index, element->neighborPage);
-@@ -773,37 +832,158 @@ HnswLoadNeighborTids(HnswElement element, ItemPointerData *indextids, Relation i
+@@ -773,37 +855,158 @@ HnswLoadNeighborTids(HnswElement element, ItemPointerData *indextids, Relation i
  
  	/* Copy to minimize lock time */
  	start = (element->level - lc) * m;
@@ -2036,14 +2076,14 @@ index 7afed25..3dc538a 100644
 +		else
 +		{
 +			tidhash_insert(v->tids, *indextid, &found);
- 
--		if (!found)
--			unvisited[(*unvisitedLength)++].indextid = *indextid;
++
 +			if (!found)
 +				unvisited[(*unvisitedLength)++].entry = entries[i];
 +		}
 +	}
-+
+ 
+-		if (!found)
+-			unvisited[(*unvisitedLength)++].indextid = *indextid;
 +	/* Compute estimated distances from the neighbor metadata */
 +	if (useMetadata)
 +	{
@@ -2103,7 +2143,7 @@ index 7afed25..3dc538a 100644
  	}
  }
  
-@@ -811,11 +991,12 @@ HnswLoadUnvisitedFromDisk(HnswElement element, HnswUnvisited * unvisited, int *u
+@@ -811,11 +1014,12 @@ HnswLoadUnvisitedFromDisk(HnswElement element, HnswUnvisited * unvisited, int *u
   * Algorithm 2 from paper
   */
  List *
@@ -2117,7 +2157,7 @@ index 7afed25..3dc538a 100644
  	int			wlen = 0;
  	visited_hash vh;
  	ListCell   *lc2;
-@@ -825,6 +1006,10 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
+@@ -825,6 +1029,10 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
  	HnswUnvisited *unvisited = palloc(lm * sizeof(HnswUnvisited));
  	int			unvisitedLength;
  	bool		inMemory = index == NULL;
@@ -2128,7 +2168,7 @@ index 7afed25..3dc538a 100644
  
  	if (v == NULL)
  	{
-@@ -847,6 +1032,9 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
+@@ -847,6 +1055,9 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
  		localNeighborhood = palloc(neighborhoodSize);
  	}
  
@@ -2138,7 +2178,7 @@ index 7afed25..3dc538a 100644
  	/* Add entry points to v, C, and W */
  	foreach(lc2, ep)
  	{
-@@ -883,12 +1071,26 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
+@@ -883,12 +1094,26 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
  		if (c->distance > f->distance)
  			break;
  
@@ -2166,7 +2206,7 @@ index 7afed25..3dc538a 100644
  
  		/* OK to count elements instead of tuples */
  		if (tuples != NULL)
-@@ -910,7 +1112,7 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
+@@ -910,7 +1135,7 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
  			}
  			else
  			{
@@ -2175,7 +2215,7 @@ index 7afed25..3dc538a 100644
  				BlockNumber blkno = ItemPointerGetBlockNumber(indextid);
  				OffsetNumber offno = ItemPointerGetOffsetNumber(indextid);
  
-@@ -943,23 +1145,62 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
+@@ -943,23 +1168,62 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
  			pairingheap_add(C, &e->c_node);
  			pairingheap_add(W, &e->w_node);
  
@@ -2253,7 +2293,7 @@ index 7afed25..3dc538a 100644
  			}
  		}
  	}
-@@ -1267,7 +1508,7 @@ PrecomputeHash(char *base, HnswElement element)
+@@ -1267,7 +1531,7 @@ PrecomputeHash(char *base, HnswElement element)
   * Algorithm 1 from paper
   */
  void
@@ -2262,7 +2302,7 @@ index 7afed25..3dc538a 100644
  {
  	List	   *ep;
  	List	   *w;
-@@ -1294,7 +1535,7 @@ HnswFindElementNeighbors(char *base, HnswElement element, HnswElement entryPoint
+@@ -1294,7 +1558,7 @@ HnswFindElementNeighbors(char *base, HnswElement element, HnswElement entryPoint
  	/* 1st phase: greedy search to insert level */
  	for (int lc = entryLevel; lc >= level + 1; lc--)
  	{
@@ -2271,7 +2311,7 @@ index 7afed25..3dc538a 100644
  		ep = w;
  	}
  
-@@ -1313,7 +1554,7 @@ HnswFindElementNeighbors(char *base, HnswElement element, HnswElement entryPoint
+@@ -1313,7 +1577,7 @@ HnswFindElementNeighbors(char *base, HnswElement element, HnswElement entryPoint
  		List	   *lw = NIL;
  		ListCell   *lc2;
  
@@ -2280,7 +2320,7 @@ index 7afed25..3dc538a 100644
  
  		/* Convert search candidates to candidates */
  		foreach(lc2, w)
-@@ -1370,13 +1611,44 @@ HnswGetTypeInfo(Relation index)
+@@ -1370,13 +1634,44 @@ HnswGetTypeInfo(Relation index)
  
  	if (procinfo == NULL)
  	{
@@ -2331,7 +2371,7 @@ index 7afed25..3dc538a 100644
  	}
  	else
  		return (const HnswTypeInfo *) DatumGetPointer(FunctionCall0Coll(procinfo, InvalidOid));
-@@ -1389,7 +1661,13 @@ hnsw_halfvec_support(PG_FUNCTION_ARGS)
+@@ -1389,7 +1684,13 @@ hnsw_halfvec_support(PG_FUNCTION_ARGS)
  	static const HnswTypeInfo typeInfo = {
  		.maxDimensions = HNSW_MAX_DIM * 2,
  		.normalize = halfvec_l2_normalize,
@@ -2346,7 +2386,7 @@ index 7afed25..3dc538a 100644
  	};
  
  	PG_RETURN_POINTER(&typeInfo);
-@@ -1402,7 +1680,13 @@ hnsw_bit_support(PG_FUNCTION_ARGS)
+@@ -1402,7 +1703,13 @@ hnsw_bit_support(PG_FUNCTION_ARGS)
  	static const HnswTypeInfo typeInfo = {
  		.maxDimensions = HNSW_MAX_DIM * 32,
  		.normalize = NULL,
@@ -2361,7 +2401,7 @@ index 7afed25..3dc538a 100644
  	};
  
  	PG_RETURN_POINTER(&typeInfo);
-@@ -1415,7 +1699,13 @@ hnsw_sparsevec_support(PG_FUNCTION_ARGS)
+@@ -1415,7 +1722,13 @@ hnsw_sparsevec_support(PG_FUNCTION_ARGS)
  	static const HnswTypeInfo typeInfo = {
  		.maxDimensions = SPARSEVEC_MAX_DIM,
  		.normalize = sparsevec_l2_normalize,
@@ -2377,7 +2417,7 @@ index 7afed25..3dc538a 100644
  
  	PG_RETURN_POINTER(&typeInfo);
 diff --git a/src/hnswvacuum.c b/src/hnswvacuum.c
-index 251d9d9..09fc801 100644
+index 251d9d9..d319641 100644
 --- a/src/hnswvacuum.c
 +++ b/src/hnswvacuum.c
 @@ -5,6 +5,7 @@
@@ -2388,6 +2428,15 @@ index 251d9d9..09fc801 100644
  #include "storage/bufmgr.h"
  #include "storage/lmgr.h"
  #include "utils/memutils.h"
+@@ -26,7 +27,7 @@ DeletedContains(tidhash_hash * deleted, ItemPointer indextid)
+ static void
+ RemoveHeapTids(HnswVacuumState * vacuumstate)
+ {
+-	BlockNumber blkno = HNSW_HEAD_BLKNO;
++	BlockNumber blkno = HnswGetHeadBlockNumber(vacuumstate->index);
+ 	HnswElement highestPoint = &vacuumstate->highestPoint;
+ 	Relation	index = vacuumstate->index;
+ 	BufferAccessStrategy bas = vacuumstate->bas;
 @@ -138,6 +139,8 @@ static bool
  NeedsUpdated(HnswVacuumState * vacuumstate, HnswElement element)
  {
@@ -2462,8 +2511,21 @@ index 251d9d9..09fc801 100644
  }
  
  /*
-@@ -439,6 +447,8 @@ MarkDeleted(HnswVacuumState * vacuumstate)
- 	BlockNumber blkno = HNSW_HEAD_BLKNO;
+@@ -323,7 +331,7 @@ RepairGraph(HnswVacuumState * vacuumstate)
+ {
+ 	Relation	index = vacuumstate->index;
+ 	BufferAccessStrategy bas = vacuumstate->bas;
+-	BlockNumber blkno = HNSW_HEAD_BLKNO;
++	BlockNumber blkno = HnswGetHeadBlockNumber(index);
+ 
+ 	/*
+ 	 * Wait for inserts to complete. Inserts before this point may have
+@@ -436,9 +444,11 @@ RepairGraph(HnswVacuumState * vacuumstate)
+ static void
+ MarkDeleted(HnswVacuumState * vacuumstate)
+ {
+-	BlockNumber blkno = HNSW_HEAD_BLKNO;
++	BlockNumber blkno = HnswGetHeadBlockNumber(vacuumstate->index);
  	BlockNumber insertPage = InvalidBlockNumber;
  	Relation	index = vacuumstate->index;
 +	bool		neighborMetadata = HnswSupportNeighborMetadata(index);
@@ -2683,7 +2745,7 @@ index 29ea724..a81a24f 100644
     val   
  ---------
 diff --git a/test/t/012_hnsw_vector_build_recall.pl b/test/t/012_hnsw_vector_build_recall.pl
-index 9358874..78a5400 100644
+index 9358874..860aa4f 100644
 --- a/test/t/012_hnsw_vector_build_recall.pl
 +++ b/test/t/012_hnsw_vector_build_recall.pl
 @@ -55,7 +55,7 @@ $node->start;
@@ -2699,7 +2761,7 @@ index 9358874..78a5400 100644
  
  	# Build index in parallel on disk
  	# Set parallel_workers on table to use workers with low maintenance_work_mem
-+	# NOTE: Due to PQ, the required maintenance_work_mem changes, so we're increasing the setting value
++	# NOTE: Due to PQ encoding, the required maintenance_work_mem changes, so we're increasing the setting value
 +	# while tripling the amount of data inserted accordingly
  	($ret, $stdout, $stderr) = $node->psql("postgres", qq(
  		ALTER TABLE tst SET (parallel_workers = 2);
@@ -2709,6 +2771,21 @@ index 9358874..78a5400 100644
  		CREATE INDEX idx ON tst USING hnsw (v $opclass);
  		ALTER TABLE tst RESET (parallel_workers);
  	));
+diff --git a/test/t/016_hnsw_inserts.pl b/test/t/016_hnsw_inserts.pl
+index 2b2f479..f45e41e 100644
+--- a/test/t/016_hnsw_inserts.pl
++++ b/test/t/016_hnsw_inserts.pl
+@@ -40,8 +40,10 @@ for my $i (1 .. 20)
+ 		}
+ 	);
+ 
++	# TODO When candidate pruning enabled, not all candidates can be returned, making results non-deterministic
+ 	my $count = $node->safe_psql("postgres", qq(
+ 		SET enable_seqscan = off;
++		SET hnsw.candidate_pruning = off;
+ 		SELECT COUNT(*) FROM (SELECT v FROM tst ORDER BY v <-> (SELECT v FROM tst LIMIT 1)) t;
+ 	));
+ 	is($count, 10);
 diff --git a/test/t/017_hnsw_filtering.pl b/test/t/017_hnsw_filtering.pl
 index afa2a1c..00b6a9d 100644
 --- a/test/t/017_hnsw_filtering.pl
@@ -2768,17 +2845,3 @@ index e75c697..23f8fff 100644
  	SELECT COUNT(*) FROM (SELECT v FROM tst WHERE i % 10000 = 0 ORDER BY v <-> (SELECT v FROM tst LIMIT 1) LIMIT 11) t;
  ));
  is($count, 10);
-diff --git a/test/t/044_hnsw_iterative_scan_recall.pl b/test/t/044_hnsw_iterative_scan_recall.pl
-index 0543f5b..f0409f6 100644
---- a/test/t/044_hnsw_iterative_scan_recall.pl
-+++ b/test/t/044_hnsw_iterative_scan_recall.pl
-@@ -108,7 +108,8 @@ for my $i (0 .. $#operators)
- 			push(@expected, $res);
- 		}
- 
--		test_recall($c, 40, 0.99, $operator, "strict_order");
-+		# TODO Accuracy deteriorates in strict_order due to the influence of pruned elements
-+		test_recall($c, 40, 0.60, $operator, "strict_order");
- 		test_recall($c, 40, 0.99, $operator, "relaxed_order");
- 	}
- 
