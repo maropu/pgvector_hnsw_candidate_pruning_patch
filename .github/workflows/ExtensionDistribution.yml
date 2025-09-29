@@ -9,7 +9,7 @@ on:
 env:
   PG_MAJOR: "17"
   PGVECTOR_REF: "v0.8.0"
-  PATCH_FILE: "pgvector_v0.8.0_hnsw_candidate_pruning.patch"
+  PATCH_FILE: "pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch"
 
 jobs:
   # ===== Linux (linux/amd64) build =====
@@ -321,4 +321,3 @@ jobs:
         with:
           name: ${{ steps.meta.outputs.artifact_name }}
           path: ${{ steps.collect.outputs.tarpath }}
-

@@ -10,7 +10,6 @@ on:
 env:
   PG_MAJOR: "17"
   PGVECTOR_REF: "v0.8.0"
-  PATCH_FILE: "pgvector_v0.8.0_hnsw_candidate_pruning.patch"
 
 permissions:
   contents: read
@@ -25,11 +24,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Ensure patch file exists
-        run: |
-          set -euxo pipefail
-          test -f "$PATCH_FILE"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -112,4 +106,3 @@ jobs:
           name: pgvector-${{ env.PGVECTOR_REF }}-pg${{ env.PG_MAJOR }}-docker-linux-amd64
           path: dist
           overwrite: true
-
