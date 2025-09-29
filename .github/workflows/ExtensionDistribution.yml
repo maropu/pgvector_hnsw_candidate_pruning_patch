@@ -72,8 +72,8 @@ jobs:
         working-directory: /tmp/pgvector
         run: |
           set -eux
-          test -f "${GITHUB_WORKSPACE}/${PATCH_FILE}"
-          patch -p1 < "${GITHUB_WORKSPACE}/${PATCH_FILE}"
+          test -f "${GITHUB_WORKSPACE}/${{ matrix.patch_file }}"
+          patch -p1 < "${GITHUB_WORKSPACE}/${{ matrix.patch_file }}"
 
       - name: Build
         working-directory: /tmp/pgvector
