@@ -41,7 +41,7 @@ $ git fetch --tags --depth 1 origin "v0.8.0"
 $ git checkout "v0.8.0"
 
 // Compile and install pgvector w/the patch
-$ patch -p1 < pgvector_v0.8.0_hnsw_candidate_pruning.patch
+$ patch -p1 < pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch
 $ make
 $ make install
 ```

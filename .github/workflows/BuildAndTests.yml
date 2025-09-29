@@ -1,4 +1,4 @@
-name: pgvector tests (w/the patch)
+name: pgvector tests (w/patches)
 
 on:
   push:
@@ -10,15 +10,24 @@ env:
   PG_MAJOR: "17"
   PG_VERSION_FULL: "17.5"
   PGVECTOR_REF: "v0.8.0"
-  PATCH_FILE: "pgvector_v0.8.0_hnsw_candidate_pruning.patch"
 
 jobs:
   # Job 1: SQL regression tests (pgvector/test/sql via make installcheck)
+  # NOTE: Matrix configuration is duplicated in both jobs due to GitHub Actions limitations
   sql-tests-linux:
-    name: SQL tests (installcheck) on Linux
+    name: SQL tests (${{ matrix.patch_name }}) on Linux
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: true
+      fail-fast: false
+      matrix:
+        patch_file:
+          - "pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch"
+          - "pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch"
+        include:
+          - patch_file: "pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch"
+            patch_name: "SimHash"
+          - patch_file: "pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch"
+            patch_name: "PQ"
 
     # NOTE: 'container.image' cannot use the 'env' context at compile time.
     # If PG_MAJOR is changed above, update this tag accordingly.
@@ -49,12 +58,13 @@ jobs:
           git checkout "$PGVECTOR_REF"
           git --no-pager log -1 --oneline
 
-      - name: Apply patch
+      - name: Apply ${{ matrix.patch_name }} patch
         working-directory: /tmp/pgvector
         run: |
           set -eux
-          test -f "${GITHUB_WORKSPACE}/${PATCH_FILE}"
-          patch -p1 < "${GITHUB_WORKSPACE}/${PATCH_FILE}"
+          test -f "${GITHUB_WORKSPACE}/${{ matrix.patch_file }}"
+          echo "Applying patch: ${{ matrix.patch_file }}"
+          patch -p1 < "${GITHUB_WORKSPACE}/${{ matrix.patch_file }}"
 
       - name: Build & install extension
         working-directory: /tmp/pgvector
@@ -106,7 +116,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sql-results-${{ env.PGVECTOR_REF }}-pg${{ env.PG_MAJOR }}
+          name: sql-results-${{ matrix.patch_name }}-${{ env.PGVECTOR_REF }}-pg${{ env.PG_MAJOR }}
           path: |
             /tmp/pgvector/regression.diffs
             /tmp/pgvector/results
@@ -114,10 +124,19 @@ jobs:
 
   # Job 2: TAP integration tests (pgvector/test/t via prove)
   tap-tests-linux:
-    name: TAP tests (prove) on Linux
+    name: TAP tests (${{ matrix.patch_name }}) on Linux
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: true
+      fail-fast: false
+      matrix:
+        patch_file:
+          - "pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch"
+          - "pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch"
+        include:
+          - patch_file: "pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch"
+            patch_name: "SimHash"
+          - patch_file: "pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch"
+            patch_name: "PQ"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -126,7 +145,8 @@ jobs:
         run: |
           echo "PG_VERSION_FULL=$PG_VERSION_FULL"
           echo "PGVECTOR_REF=$PGVECTOR_REF"
-          echo "PATCH_FILE=$PATCH_FILE"
+          echo "PATCH_FILE=${{ matrix.patch_file }}"
+          echo "PATCH_NAME=${{ matrix.patch_name }}"
           echo "Base image: postgres:17-bookworm"
 
       - name: Derive PATHs for TAP
@@ -188,12 +208,13 @@ jobs:
           git checkout "$PGVECTOR_REF"
           git --no-pager log -1 --oneline
 
-      - name: Apply patch
+      - name: Apply ${{ matrix.patch_name }} patch
         working-directory: /tmp/pgvector
         run: |
           set -eux
-          test -f "${GITHUB_WORKSPACE}/${PATCH_FILE}"
-          patch -p1 < "${GITHUB_WORKSPACE}/${PATCH_FILE}"
+          test -f "${GITHUB_WORKSPACE}/${{ matrix.patch_file }}"
+          echo "Applying patch: ${{ matrix.patch_file }}"
+          patch -p1 < "${GITHUB_WORKSPACE}/${{ matrix.patch_file }}"
 
       - name: Move under PostgreSQL contrib
         run: |
@@ -213,21 +234,20 @@ jobs:
           set -euo pipefail
           set -x
           cd "${POSTGRESQL_SRC}/contrib/pgvector"
-          prove -I "${POSTGRESQL_SRC}/src/test/perl/" test/t/*.pl |& tee "$GITHUB_WORKSPACE/tap-output.txt"
+          prove -I "${POSTGRESQL_SRC}/src/test/perl/" test/t/*.pl |& tee "$GITHUB_WORKSPACE/tap-output-${{ matrix.patch_name }}.txt"
 
       - name: Collect TAP logs
         if: always()
         run: |
           set -eux
-          mv "${POSTGRESQL_SRC}/contrib/pgvector/log" "$GITHUB_WORKSPACE/tap-logs"
+          mv "${POSTGRESQL_SRC}/contrib/pgvector/log" "$GITHUB_WORKSPACE/tap-logs-${{ matrix.patch_name }}"
 
       - name: Upload TAP outputs and logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tap-results-${{ env.PGVECTOR_REF }}-pg${{ env.PG_MAJOR }}
+          name: tap-results-${{ matrix.patch_name }}-${{ env.PGVECTOR_REF }}-pg${{ env.PG_MAJOR }}
           path: |
-            ${{ github.workspace }}/tap-output.txt
-            ${{ github.workspace }}/tap-logs
+            ${{ github.workspace }}/tap-output-${{ matrix.patch_name }}.txt
+            ${{ github.workspace }}/tap-logs-${{ matrix.patch_name }}
           if-no-files-found: warn
-
