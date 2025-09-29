@@ -9,6 +9,7 @@
 #   docker build \
 #     --build-arg PG_MAJOR=17 \
 #     --build-arg PGVECTOR_REF=v0.8.0 \
+#     --build-arg PATCH_FILE=pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch \
 #     -t pgvector-artifacts:pg17-v0.8.0 .
 #
 # Extract artifacts via `docker cp` (no container start required):
@@ -21,6 +22,7 @@
 #   docker buildx build \
 #     --build-arg PG_MAJOR=17 \
 #     --build-arg PGVECTOR_REF=v0.8.0 \
+#     --build-arg PATCH_FILE=pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch \
 #     --target out \
 #     --output type=local,dest=./dist \
 #     .
@@ -33,17 +35,19 @@
 
 ARG PG_MAJOR=17
 ARG PGVECTOR_REF=v0.8.0
+ARG PATCH_FILE=pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch
 
 # ---- Build stage (keeps ABI with target Postgres by using postgres:<major>-bookworm) ----
 FROM postgres:${PG_MAJOR}-bookworm AS build
 ARG PG_MAJOR
 ARG PGVECTOR_REF
+ARG PATCH_FILE
 
 # Fetch source at the specified git ref (tag/SHA) using BuildKit remote git context
 ADD https://github.com/pgvector/pgvector.git#${PGVECTOR_REF} /tmp/pgvector
 
-# Copy the fixed patch file from build context
-COPY pgvector_v0.8.0_hnsw_candidate_pruning.patch /tmp/pgvector/
+# Copy the specified patch file from build context
+COPY ${PATCH_FILE} /tmp/pgvector/
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -65,11 +69,11 @@ WORKDIR /tmp/pgvector
 
 # --- Patch (dry-run for diagnostics) ---
 RUN set -eux; \
-    patch -p1 --forward --dry-run < pgvector_v0.8.0_hnsw_candidate_pruning.patch
+    patch -p1 --forward --dry-run < "${PATCH_FILE}"
 
 # --- Apply patch ---
 RUN set -eux; \
-    patch -p1 --forward < pgvector_v0.8.0_hnsw_candidate_pruning.patch
+    patch -p1 --forward < "${PATCH_FILE}"
 
 # --- Build extension ---
 RUN set -eux; \
@@ -117,4 +121,3 @@ COPY --from=build /artifacts /artifacts
 LABEL org.opencontainers.image.title="pgvector artifacts" \
       org.opencontainers.image.description="pgvector build outputs under /artifacts" \
       org.opencontainers.image.source="https://github.com/pgvector/pgvector"
-
