@@ -2682,6 +2682,33 @@ index 29ea724..a81a24f 100644
  SELECT * FROM t ORDER BY val <-> '[3,3,3]';
     val   
  ---------
+diff --git a/test/t/012_hnsw_vector_build_recall.pl b/test/t/012_hnsw_vector_build_recall.pl
+index 9358874..78a5400 100644
+--- a/test/t/012_hnsw_vector_build_recall.pl
++++ b/test/t/012_hnsw_vector_build_recall.pl
+@@ -55,7 +55,7 @@ $node->start;
+ $node->safe_psql("postgres", "CREATE EXTENSION vector;");
+ $node->safe_psql("postgres", "CREATE TABLE tst (i int4, v vector(3));");
+ $node->safe_psql("postgres",
+-	"INSERT INTO tst SELECT i, ARRAY[$array_sql] FROM generate_series(1, 10000) i;"
++	"INSERT INTO tst SELECT i, ARRAY[$array_sql] FROM generate_series(1, 30000) i;"
+ );
+ 
+ # Generate queries
+@@ -112,10 +112,12 @@ for my $i (0 .. $#operators)
+ 
+ 	# Build index in parallel on disk
+ 	# Set parallel_workers on table to use workers with low maintenance_work_mem
++	# NOTE: Due to PQ, the required maintenance_work_mem changes, so we're increasing the setting value
++	# while tripling the amount of data inserted accordingly
+ 	($ret, $stdout, $stderr) = $node->psql("postgres", qq(
+ 		ALTER TABLE tst SET (parallel_workers = 2);
+ 		SET client_min_messages = DEBUG;
+-		SET maintenance_work_mem = '4MB';
++		SET maintenance_work_mem = '14MB';
+ 		CREATE INDEX idx ON tst USING hnsw (v $opclass);
+ 		ALTER TABLE tst RESET (parallel_workers);
+ 	));
 diff --git a/test/t/017_hnsw_filtering.pl b/test/t/017_hnsw_filtering.pl
 index afa2a1c..00b6a9d 100644
 --- a/test/t/017_hnsw_filtering.pl
