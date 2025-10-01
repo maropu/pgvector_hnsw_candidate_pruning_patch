@@ -353,7 +353,7 @@ index 1fb0c24..63e84d5 100644
  const		HnswTypeInfo *HnswGetTypeInfo(Relation index);
  PGDLLEXPORT void HnswParallelBuildMain(dsm_segment *seg, shm_toc *toc);
 diff --git a/src/hnswbuild.c b/src/hnswbuild.c
-index b667478..35db5d6 100644
+index b667478..bfb77d6 100644
 --- a/src/hnswbuild.c
 +++ b/src/hnswbuild.c
 @@ -47,6 +47,7 @@
@@ -501,19 +501,22 @@ index b667478..35db5d6 100644
  	buildstate->dimensions = TupleDescAttr(index->rd_att, 0)->atttypmod;
  
  	/* Disallow varbit since require fixed dimensions */
-@@ -699,6 +735,11 @@ InitBuildState(HnswBuildState * buildstate, Relation heap, Relation index, Index
+@@ -699,6 +735,14 @@ InitBuildState(HnswBuildState * buildstate, Relation heap, Relation index, Index
  	buildstate->ml = HnswGetMl(buildstate->m);
  	buildstate->maxLevel = HnswGetMaxLevel(buildstate->m);
  
-+	/* Only used when neighborMetadata is enabled */
-+	buildstate->neighborMetadataState = NULL;
++	if (buildstate->neighborMetadata && buildstate->typeInfo->neighborMetadataBytes > 0)
++		HnswInitNeighborMetadataState(index, buildstate);
++	else
++		buildstate->neighborMetadataState = NULL;
++
 +	buildstate->kmeansnormprocinfo = NULL;
 +	buildstate->collation = InvalidOid;
 +
  	buildstate->graphCtx = GenerationContextCreate(CurrentMemoryContext,
  												   "Hnsw build graph context",
  #if PG_VERSION_NUM >= 150000
-@@ -722,6 +763,9 @@ InitBuildState(HnswBuildState * buildstate, Relation heap, Relation index, Index
+@@ -722,6 +766,9 @@ InitBuildState(HnswBuildState * buildstate, Relation heap, Relation index, Index
  static void
  FreeBuildState(HnswBuildState * buildstate)
  {
@@ -523,7 +526,7 @@ index b667478..35db5d6 100644
  	MemoryContextDelete(buildstate->graphCtx);
  	MemoryContextDelete(buildstate->tmpCtx);
  }
-@@ -763,7 +807,7 @@ ParallelHeapScan(HnswBuildState * buildstate)
+@@ -763,7 +810,7 @@ ParallelHeapScan(HnswBuildState * buildstate)
   * Perform a worker's portion of a parallel insert
   */
  static void
@@ -532,7 +535,7 @@ index b667478..35db5d6 100644
  {
  	HnswBuildState buildstate;
  	TableScanDesc scan;
-@@ -776,6 +820,18 @@ HnswParallelScanAndInsert(Relation heapRel, Relation indexRel, HnswShared * hnsw
+@@ -776,6 +823,18 @@ HnswParallelScanAndInsert(Relation heapRel, Relation indexRel, HnswShared * hnsw
  	InitBuildState(&buildstate, heapRel, indexRel, indexInfo, MAIN_FORKNUM);
  	buildstate.graph = &hnswshared->graphData;
  	buildstate.hnswarea = hnswarea;
@@ -551,7 +554,7 @@ index b667478..35db5d6 100644
  	InitAllocator(&buildstate.allocator, &HnswSharedMemoryAlloc, &buildstate);
  	scan = table_beginscan_parallel(heapRel,
  									ParallelTableScanFromHnswShared(hnswshared));
-@@ -844,7 +900,7 @@ HnswParallelBuildMain(dsm_segment *seg, shm_toc *toc)
+@@ -844,7 +903,7 @@ HnswParallelBuildMain(dsm_segment *seg, shm_toc *toc)
  	hnswarea = shm_toc_lookup(toc, PARALLEL_KEY_HNSW_AREA, false);
  
  	/* Perform inserts */
@@ -560,7 +563,7 @@ index b667478..35db5d6 100644
  
  	/* Close relations within worker */
  	index_close(indexRel, indexLockmode);
-@@ -871,9 +927,14 @@ HnswEndParallel(HnswLeader * hnswleader)
+@@ -871,9 +930,14 @@ HnswEndParallel(HnswLeader * hnswleader)
   * Return size of shared memory required for parallel index build
   */
  static Size
@@ -577,7 +580,7 @@ index b667478..35db5d6 100644
  }
  
  /*
-@@ -885,7 +946,7 @@ HnswLeaderParticipateAsWorker(HnswBuildState * buildstate)
+@@ -885,7 +949,7 @@ HnswLeaderParticipateAsWorker(HnswBuildState * buildstate)
  	HnswLeader *hnswleader = buildstate->hnswleader;
  
  	/* Perform work common to all participants */
@@ -586,7 +589,7 @@ index b667478..35db5d6 100644
  }
  
  /*
-@@ -898,6 +959,7 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
+@@ -898,6 +962,7 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
  	Snapshot	snapshot;
  	Size		esthnswshared;
  	Size		esthnswarea;
@@ -594,7 +597,7 @@ index b667478..35db5d6 100644
  	Size		estother;
  	HnswShared *hnswshared;
  	char	   *hnswarea;
-@@ -921,9 +983,14 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
+@@ -921,9 +986,14 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
  		snapshot = RegisterSnapshot(GetTransactionSnapshot());
  
  	/* Estimate size of workspaces */
@@ -610,7 +613,7 @@ index b667478..35db5d6 100644
  	/* Leave space for other objects in shared memory */
  	/* Docker has a default limit of 64 MB for shm_size */
  	/* which happens to be the default value of maintenance_work_mem */
-@@ -933,7 +1000,7 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
+@@ -933,7 +1003,7 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
  		esthnswarea -= estother;
  
  	shm_toc_estimate_chunk(&pcxt->estimator, esthnswarea);
@@ -619,7 +622,7 @@ index b667478..35db5d6 100644
  
  	/* Finally, estimate PARALLEL_KEY_QUERY_TEXT space */
  	if (debug_query_string)
-@@ -964,6 +1031,22 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
+@@ -964,6 +1034,22 @@ HnswBeginParallel(HnswBuildState * buildstate, bool isconcurrent, int request)
  	hnswshared->heaprelid = RelationGetRelid(buildstate->heap);
  	hnswshared->indexrelid = RelationGetRelid(buildstate->index);
  	hnswshared->isconcurrent = isconcurrent;
@@ -642,17 +645,6 @@ index b667478..35db5d6 100644
  	ConditionVariableInit(&hnswshared->workersdonecv);
  	SpinLockInit(&hnswshared->mutex);
  	/* Initialize mutable state */
-@@ -1102,6 +1185,10 @@ BuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
- 
- 	InitBuildState(buildstate, heap, index, indexInfo, forkNum);
- 
-+	/* Initialize neighbor metadata state */
-+	if (buildstate->neighborMetadata && buildstate->typeInfo->neighborMetadataBytes > 0)
-+		HnswInitNeighborMetadataState(index, buildstate);
-+
- 	BuildGraph(buildstate, forkNum);
- 
- 	if (RelationNeedsWAL(index) || forkNum == INIT_FORKNUM)
 diff --git a/src/hnswinsert.c b/src/hnswinsert.c
 index a5fac4e..19b16e4 100644
 --- a/src/hnswinsert.c
