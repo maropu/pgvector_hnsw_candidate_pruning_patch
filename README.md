@@ -13,25 +13,26 @@ The search algorithm proposed in the HNSW paper [1] proceeds greedily: for a ver
 between all of its adjacent candidate vectices and the query, then iteratively moves to the neighbor that most reduces the distance to the query.
 In pgvector, which follows the PASE’s design, these adjacent vertices are often located on different disk blocks, leading to frequent random block accesses during search.
 This becomes a major issue in an RDBMS, where sophisticated concurrency control for transaction processing makes both I/O overhead and lock contention critical concerns.
-To mitigate this, the patch embeds metadata into each vertex that allows estimating distances between its neighbors and the query
-without reading the disk blocks containing those neighbors.
-Specifically, Each vertex tuple in a disk block stores 16 bytes of per-neighbor metadata:
-(1) a 96-bit SimHash [3] of the $d$-dimensional edge vector $\Delta = (n - c)$, and (2) the edge length $\lVert \Delta \rVert$ (a single-precision floating-point value).
-Here, $c \in \mathbb{R}^d$ is the current vertex vector, $n \in \mathbb{R}^d$ is a neighbor vector, and $q \in \mathbb{R}^d$ is the query vector; let $v = (q - c)$.
+To mitigate this, this work provides two alternative patches that embed per-neighbor metadata into each vertex and use it to estimate distances to the query
+without reading the disk blocks containing those neighbors. Neighbors of the current vertex are first ranked by an estimated distance $\hat d(q,n)$,
+and only the top-k are fetched to compute exact distances; this reduces random I/O and contention while preserving accuracy.
+This strategy is well known in earlier work as two-level search with hybrid distance [4] or re-ranking [6,7,8].
 
-At search time, it computes the SimHash of the query vector $v$ and estimates the angle $\hat{\theta}$ between $v$ and the edge vector $\Delta$ from their Hamming distance.
-It computes all the angles and then sorts neighbor candidates by estimated distance $\widehat{d}(q,n)$ computed from the cosine theorem. 
-By using this estimated distance, the search can prioritize neighbors without fetching the disk blocks that contain their vectors.
-Specifically, candidate neighbors are first sorted in ascending order of $\widehat{d}(q,n)$,
-and only the top-k neighbors (k=3 by default) are accessed from other disk blocks to compute their exact distances.
-This strategy implemented in the patch results in reducing random I/O and lock contention in PostgreSQL.
+The first patch adopts a SimHash-based estimator: each vertex tuple stores 16 bytes of per-neighbor metadata consisting of a 96-bit SimHash [3] of the edge vector $\Delta = (n - c)$ and
+the edge length $\|\Delta\|$. At query time, it computes the SimHash of the query offset $v = (q - c)$, estimates the angle $\hat{\theta}$ between $v$ and $\Delta$
+from their Hamming distance, and derives an estimated $L_2$ distance $\hat d(q,n)$ via the cosine theorem.
+Here, $c \in \mathbb{R}^d$ is the current vertex vector, $n \in \mathbb{R}^d$ is a neighbor vector, and $q \in \mathbb{R}^d$ is the query vector.
+This design is training-free, compact, and computationally light.
 
-This strategy is well-known as the two-level search with hybrid distance [4] or re-ranking [6,7,8], but differs in that
-they employ product quantization (PQ) [5] for distance estimation.
-In contrast, the patch adopts SimHash, as its fixed-length bit representation is more compact and
-computationally lighter than the compressed vectors produced by PQ.
+Alternatively, the second patch employs Product Quantization (PQ) [5] as the estimator. The neighbor vector $n$ is split into $M$ equal-length parts $n_1,\ldots,n_M$.
+For each part $j$, the index stores a one-byte code $\mathrm{code}_j(n)$ that points to the nearest centroid in a learned codebook $C_j$ with $k$ centroids $c_{j,1}, \ldots, c_{j,k}$.
+At query time, the PQ code is simply decoded: for each part $j$ we read the centroid $c_{j,\mathrm{code}_j(n)}$ and
+reconstruct an approximate neighbor $\tilde{n}$ by concatenating these centroids.
+The estimated distance is then $\hat d(q,n) = \| q - \tilde{n} \|$.
+Neighbors are ranked by $\hat{d}(q,n)$ and, as in the first patch, only the top-k are fetched to compute exact distances.
+Compared to SimHash, PQ offers stronger estimation at the cost of build-time training and additional storage for codebooks.
 
-Apply the patch to pgvector and compile it as described below:
+Apply the patches to pgvector and compile them as described below:
 
 ```shell
 // Cehckout pgvector v0.8.0
@@ -39,9 +40,20 @@ $ git clone --depth 1 https://github.com/pgvector/pgvector.git
 $ cd pgvector
 $ git fetch --tags --depth 1 origin "v0.8.0"
 $ git checkout "v0.8.0"
+```
 
-// Compile and install pgvector w/the patch
+The SimHash-based patch:
+```shell
+// Compile and install pgvector w/the the SimHash-based patch
 $ patch -p1 < pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch
+$ make
+$ make install
+```
+
+The PQ-based patch:
+```shell
+// Compile and install pgvector w/the PQ-based patch
+$ patch -p1 < pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch
 $ make
 $ make install
 ```
@@ -85,11 +97,8 @@ in block read while maintaining accuracy, with the benefits observed in the high
 
 ## TODO
 
- - Improve the patch to further reduce the number of blocks read
+ - Improve the patches to further reduce the number of blocks read
  - Add benchmark results showing the recall-TPS (transactions per second) tradeoff and include them in the section **"Benchmark results"**
- - Document the implementation details and design considerations of this patch in the section **"Detailed design of this patch"**
- - Implement an alternative candidate pruning strategy using PQ; address the issue that the PQ codebook size (~1KB × dimension) exceeds PostgreSQL’s 8KiB page limit and devise an appropriate solution
-
 
 ## References
 
@@ -101,4 +110,3 @@ in block read while maintaining accuracy, with the benefits observed in the high
  - [6] Matthijs Douze, Alexandre Sablayrolles, and Hervé Jégou. 2018. Link and Code: Fast Indexing with Graphs and Compact Regression Codes. In Proceedings of the 2018 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR 2018). IEEE, 3646–3654. https://doi.org/10.1109/CVPR.2018.00384.
  - [7] Hervé Jégou, Romain Tavenard, Matthijs Douze, and Laurent Amsaleg. 2011. Searching in one billion vectors: Re-rank with source coding. In Proceedings of the 2011 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP 2011). IEEE, 861–864. https://doi.org/10.1109/ICASSP.2011.5946540.
  - [8] Herve Jégou, Matthijs Douze, and Cordelia Schmid. 2011. Product Quantization for Nearest Neighbor Search. IEEE Transactions on Pattern Analysis and Machine Intelligence 33, 1 (2011), 117–128. https://doi.org/10.1109/TPAMI.2010.57.
-
