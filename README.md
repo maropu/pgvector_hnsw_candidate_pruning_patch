@@ -25,10 +25,9 @@ Here, $c \in \mathbb{R}^d$ is the current vertex vector, $n \in \mathbb{R}^d$ is
 This design is training-free, compact, and computationally light.
 
 Alternatively, the second patch employs Product Quantization (PQ) [5] as the estimator. The neighbor vector $n$ is split into $M$ equal-length parts $n_1,\ldots,n_M$.
-For each part $j$, the index stores a one-byte code $\mathrm{code}_j(n)$ that points to the nearest centroid in a learned codebook $C_j$ with $k$ centroids $c_{j,1}, \ldots, c_{j,k}$.
-At query time, the PQ code is simply decoded: for each part $j$ we read the centroid $c_{j,\mathrm{code}_j(n)}$ and
-reconstruct an approximate neighbor $\tilde{n}$ by concatenating these centroids.
-The estimated distance is then $\hat d(q,n) = \| q - \tilde{n} \|$.
+For each part $j$, the index stores a one-byte code that identifies the nearest centroid in a learned codebook $C_j$ with $k$ centroids.
+At query time, the PQ code is simply decoded: for each part $j$ we read the corresponding centroid and reconstruct an approximate neighbor $\tilde{n}$ by concatenating these centroids.
+The estimated distance is then $\hat{d}(q,n) = \| q - \tilde{n} \|$.
 Neighbors are ranked by $\hat{d}(q,n)$ and, as in the first patch, only the top-k are fetched to compute exact distances.
 Compared to SimHash, PQ offers stronger estimation at the cost of build-time training and additional storage for codebooks.
 
