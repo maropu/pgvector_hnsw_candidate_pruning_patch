@@ -4,17 +4,17 @@
 
 ## What this patch does and how to apply it?
 
-This patch adds a candidate pruning logic to [pgvector](https://github.com/pgvector/pgvector)'s HNSW [1] implementation whose design is based on PASE [2].
+This work adds a candidate pruning logic to [pgvector](https://github.com/pgvector/pgvector)'s HNSW [1] implementation whose design is based on PASE [2].
 PASE is an index structure for approximate nearest neighbor search, implemented as an external extension to a general-purpose RDBMS (PostgreSQL),
-that follows the graph-based HNSW search algorithm. Since data structures in an RDBMS are typically managed as fixed-size disk blocks
-(e.g., 8 KiB in PostgreSQL), a key feature of PASE is that it organizes the graph’s vertices and edges to align naturally with these disk blocks.
+that follows the graph-based HNSW search algorithm. Since data structures in an RDBMS are typically managed as fixed-size blocks
+(e.g., 8 KiB in PostgreSQL), a key feature of PASE is that it organizes the graph’s vertices and edges to align naturally with these blocks.
 
 The search algorithm proposed in the HNSW paper [1] proceeds greedily: for a vertex representing a vector, it computes distances
 between all of its adjacent candidate vectices and the query, then iteratively moves to the neighbor that most reduces the distance to the query.
-In pgvector, which follows the PASE’s design, these adjacent vertices are often located on different disk blocks, leading to frequent random block accesses during search.
+In pgvector, which follows the PASE’s design, these adjacent vertices are often located on different blocks, leading to frequent random block accesses during search.
 This becomes a major issue in an RDBMS, where sophisticated concurrency control for transaction processing makes both I/O overhead and lock contention critical concerns.
-To mitigate this, this work provides two alternative patches that embed per-neighbor metadata into each vertex and use it to estimate distances to the query
-without reading the disk blocks containing those neighbors. Neighbors of the current vertex are first ranked by an estimated distance $\hat d(q,n)$,
+To mitigate this, the work provides two alternative patches that embed per-neighbor metadata into each vertex and use it to estimate distances to the query
+without reading the blocks containing those neighbors. Neighbors of the current vertex are first ranked by an estimated distance $\hat d(q,n)$,
 and only the top-k are fetched to compute exact distances; this reduces random I/O and contention while preserving accuracy.
 This strategy is well known in earlier work as two-level search with hybrid distance [4] or re-ranking [6,7,8].
 
@@ -57,8 +57,8 @@ $ make
 $ make install
 ```
 
-Note that **this patch is incompatible with the pgvector’s original index data format** because it adds 16 bytes per-neighbor metadata, and
-it currently supports only the L2 distance (vector_l2_ops) on single-precision floating-point vectors.
+Note that **these patches are incompatible with the pgvector’s original index data format** because they adds 16 bytes per-neighbor metadata, and
+they currently support only the L2 distance (vector_l2_ops) on single-precision floating-point vectors.
 
 ### Additional options
 
@@ -96,7 +96,8 @@ in block read while maintaining accuracy, with the benefits observed in the high
 
 ## TODO
 
- - Improve the patches to further reduce the number of blocks read
+ - Address the challenge of index size expansion due to the addition of neighbor metadata
+ - Improve the patches to further reduce the number of block accesses
  - Add benchmark results showing the recall-TPS (transactions per second) tradeoff and include them in the section **"Benchmark results"**
 
 ## References
