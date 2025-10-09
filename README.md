@@ -53,7 +53,7 @@ it currently supports only the L2 distance (vector_l2_ops) on single-precision f
 
 #### Index options
 
-Specify HNSW additional one index parameters
+Specify HNSW additional one index parameter:
 
 - `neighbor_metadata` - whether to store neighbor metadata to estimate distances (on by default)
 
@@ -63,7 +63,7 @@ CREATE INDEX ON items USING hnsw (embedding vector_l2_ops) WITH (m = 16, ef_cons
 
 #### Query options
 
-Specify HNSW additional two query parameters
+Specify HNSW additional two query parameters:
 
 - `hnsw.candidate_pruning` - enables candidate pruning for faster scans (on by default)
 - `hnsw.distance_computation_topk ` - sets the number of neighbors to compute precise distances when using distance estimation (3 by default)
