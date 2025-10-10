@@ -87,18 +87,25 @@ A higher value provides better recall at the cost of block accesses.
 
 ## Benchmark results
 
-An evaluation compared the patch with the vanilla pgvector by measuring the number of block accesses required to achieve different levels of recall.
-At Recall≈0.95, the patch achieved a reduction in block accesses of approximately 59% when k=7. The improvement became even more pronounced as recall approached 1.0,
-where block accesses were reduced by about 72% for k=3, 68% for k=5, and 64% for k=7. These results indicate that the patch provides a consistent reduction
-in block read while maintaining accuracy, with the benefits observed in the high-recall regime.
+This experiment compares vanilla pgvector with the two candidate-pruning variants (SimHash-based and PQ-based) on [SIFT1M](http://corpus-texmex.irisa.fr/) 10-NN,
+using the number of block accesses required to keep target recall levels as the metric. The evaluation uses HNSW parameters m=24 and ef_construction=200.
+As shown in the figure below, around recall=0.95, the SimHash-based variant reduces block accesses by approximately 52% (k=3), 69% (k=5), and 66% (k=7) relative to the vanilla one,
+whereas the PQ-based variant achieves stronger reductions of approximately 81% (k=3), 75% (k=5), and 69% (k=7).
+At recall=1.0, the SimHash one yields about 72% (k=3), 68% (k=5), and 64% (k=7) fewer block accesses,
+while the PQ one achieves about 84% (k=3), 77% (k=5), and 71% (k=7). Therefore, these results indicate that both patches provide a consistent reduction
+in block read while maintaining accuracy, with the benefits observed in the higher-recall regime.
 
 <img src="resources/sift1m_recall_blocks_tradeoff.png" width="600">
+
+A limitation of this design is **the increase in index size due to per‑neighbor metadata**.
+On SIFT1M, the vanilla pgvector index occupies 781 MiB, whereas enabling the 16‑byte neighbor metadata inflates the index to 1313 MiB for both patches,
+corresponding to an increase of approximately 68%. Addressing this storage overhead remains an important direction for future work.
 
 ## TODO
 
  - Address the challenge of index size expansion due to the addition of neighbor metadata
  - Improve the patches to further reduce the number of block accesses
- - Add benchmark results showing the recall-TPS (transactions per second) tradeoff and include them in the section **"Benchmark results"**
+ - Add benchmark results showing the recall-TPS (transactions per second) tradeoff and include them in the section "Benchmark results"
 
 ## References
 
