@@ -104,6 +104,7 @@ corresponding to an increase of approximately 68%. Addressing this storage overh
 ## TODO
 
  - Address the challenge of index size expansion due to the addition of neighbor metadata
+   - For follow-up work to tackle this issue, see https://github.com/maropu/pgvector_hnsw_two_stage_pq_patch
  - Improve the patches to further reduce the number of block accesses
  - Add benchmark results showing the recall-TPS (transactions per second) tradeoff and include them in the section "Benchmark results"
 
