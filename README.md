@@ -16,7 +16,7 @@ This becomes a major issue in an RDBMS, where sophisticated concurrency control 
 To mitigate this, the work provides two alternative patches that embed per-neighbor metadata into each vertex and use it to estimate distances to the query
 without reading the blocks containing those neighbors. Neighbors of the current vertex are first ranked by an estimated distance $\hat d(q,n)$,
 and only the top-k are fetched to compute exact distances; this reduces random I/O and contention while preserving accuracy.
-This strategy is well known in earlier work as two-level search with hybrid distance [4] or re-ranking [6,7,8].
+This strategy is well known in earlier work as two-level search with hybrid distance [4] or re-ranking [6,7,8,9].
 
 The first patch adopts a SimHash-based estimator: each vertex tuple stores 16 bytes of per-neighbor metadata consisting of a 96-bit SimHash [3] of the edge vector $\Delta = (n - c)$ and
 the edge length $\|\Delta\|$. At query time, it computes the SimHash of the query offset $v = (q - c)$, estimates the angle $\hat{\theta}$ between $v$ and $\Delta$
@@ -118,3 +118,4 @@ corresponding to an increase of approximately 68%. Addressing this storage overh
  - [6] Matthijs Douze, Alexandre Sablayrolles, and Hervé Jégou. 2018. Link and Code: Fast Indexing with Graphs and Compact Regression Codes. In Proceedings of the 2018 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR 2018). IEEE, 3646–3654. https://doi.org/10.1109/CVPR.2018.00384.
  - [7] Hervé Jégou, Romain Tavenard, Matthijs Douze, and Laurent Amsaleg. 2011. Searching in one billion vectors: Re-rank with source coding. In Proceedings of the 2011 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP 2011). IEEE, 861–864. https://doi.org/10.1109/ICASSP.2011.5946540.
  - [8] Herve Jégou, Matthijs Douze, and Cordelia Schmid. 2011. Product Quantization for Nearest Neighbor Search. IEEE Transactions on Pattern Analysis and Machine Intelligence 33, 1 (2011), 117–128. https://doi.org/10.1109/TPAMI.2010.57.
+ - [9] Bing Tian, Haikun Liu, Yuhang Tang, Shihai Xiao, Zhuohui Duan, Xiaofei Liao, Hai Jin, Xuecang Zhang, Junhua Zhu, and Yu Zhang. 2025. Towards high-throughput and low-latency billion-scale vector search via CPU/GPU collaborative filtering and re-ranking. In Proceedings of the 23rd USENIX Conference on File and Storage Technologies (FAST '25). USENIX Association, USA, Article 11, 171–185.
