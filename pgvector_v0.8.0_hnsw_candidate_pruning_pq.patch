@@ -909,10 +909,10 @@ index a5fac4e..19b16e4 100644
  	MemoryContextSwitchTo(oldCtx);
 diff --git a/src/hnswmeta.c b/src/hnswmeta.c
 new file mode 100644
-index 0000000..212c60f
+index 0000000..c8031c4
 --- /dev/null
 +++ b/src/hnswmeta.c
-@@ -0,0 +1,785 @@
+@@ -0,0 +1,782 @@
 +#include "postgres.h"
 +
 +#include <float.h>
@@ -1248,6 +1248,7 @@ index 0000000..212c60f
 +TrainPQCentroids(Relation index, VectorArray samples, HnswNeighborMetadataState * metastate, HnswBuildState * buildstate)
 +{
 +	VectorArray subvectorSamples;
++	int			itemSize = buildstate->typeInfo->itemSize(metastate->subvectorDim);
 +
 +	/* Allocate centroids array */
 +	metastate->centroids = (VectorArray *) palloc0(sizeof(VectorArray) * metastate->m);
@@ -1261,7 +1262,6 @@ index 0000000..212c60f
 +		int			startDim = i * metastate->subvectorDim;
 +		int			endDim = Min(startDim + metastate->subvectorDim, buildstate->dimensions);
 +		int			subvectorDim = endDim - startDim;
-+		int			itemSize = buildstate->typeInfo->itemSize(subvectorDim);
 +
 +		/* Extract sub-vectors */
 +		for (int j = 0; j < samples->length; j++)
@@ -1273,7 +1273,7 @@ index 0000000..212c60f
 +
 +			/* Set vector header */
 +			SET_VARSIZE(dstVec, itemSize);
-+			dstVec->dim = subvectorDim;
++			dstVec->dim = metastate->subvectorDim;
 +
 +			/* Copy actual data */
 +			for (int d = 0; d < subvectorDim; d++)
@@ -1285,7 +1285,7 @@ index 0000000..212c60f
 +		}
 +
 +		/* Compute centroids for sub-vectors */
-+		metastate->centroids[i] = VectorArrayInit(HNSW_PQ_NUM_CENTROIDS, subvectorDim, itemSize);
++		metastate->centroids[i] = VectorArrayInit(HNSW_PQ_NUM_CENTROIDS, metastate->subvectorDim, itemSize);
 +		KmeansImpl(index, subvectorSamples, metastate->centroids[i], buildstate);
 +	}
 +
@@ -1398,9 +1398,6 @@ index 0000000..212c60f
 +		VectorArray	centroids = metastate->centroids[i];
 +		int			bestCentroid = -1;
 +		float		bestDistance = FLT_MAX;
-+
-+		/* Update subvector dimension and copy data */
-+		sv->dim = subvectorDim;
 +
 +		for (int d = 0; d < subvectorDim; d++)
 +			sv->x[d] = vec->x[startDim + d];
