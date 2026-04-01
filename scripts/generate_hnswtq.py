@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+generate_hnswtq.py — generator for pgvector/src/hnswtq.c
+
+This script materializes the compile-time constants required by the
+TurboQuant HNSW candidate-pruning patch:
+
+  1. A random rotation matrix Pi (quant_dim x max_dim), generated via
+     QR decomposition of a Gaussian matrix (numpy seed).  Only the first
+     quant_dim rows are kept; these are used to project edge vectors into
+     a space where each coordinate follows ~N(0, 1/d), enabling independent
+     scalar quantization per coordinate.
+
+  2. (Informational) The Lloyd-Max codebook for N(0,1) with 2^bit_width
+     levels, solved via the iterative Lloyd-Max algorithm.  The codebook
+     values are embedded directly as named macros in hnswtq.h; this script
+     prints them for verification but does not write them (they are stable
+     across seeds and dimensions).
+
+What it generates:
+  - src/hnswtq.c  containing:
+        const float hnsw_tq_rotation[HNSW_TQ_QUANT_DIM_MAX][HNSW_MAX_DIM]
+
+Design notes:
+  - quant_dim defaults to 48 (fits in 12 bytes at b=2: 48*2/8 = 12).
+  - max_dim  defaults to 2000 (HNSW_MAX_DIM in hnsw.h).
+  - bit_width defaults to 2 (4 Lloyd-Max centroids).
+  - The RNG seed is fixed so the generated file is reproducible.
+
+Usage:
+  python generate_hnswtq.py \\
+      --quant-dim 48 \\
+      --max-dim   2000 \\
+      --bit-width 2 \\
+      --seed      42 \\
+      --out       ../pgvector/src/hnswtq.c
+"""
+
+import argparse
+import datetime
+import platform
+import sys
+
+import numpy as np
+from scipy.stats import norm
+
+# Silence legacy-API deprecation warnings from numpy (we use np.random.seed
+# intentionally to stay bit-for-bit compatible with the shipped hnswtq.c).
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="numpy")
+
+
+# ---------------------------------------------------------------------------
+# Lloyd-Max solver
+# ---------------------------------------------------------------------------
+
+def lloyd_max_gaussian(num_levels: int, sigma: float = 1.0, max_iter: int = 200):
+    """
+    Compute optimal Lloyd-Max quantizer centroids and decision boundaries
+    for N(0, sigma^2) with *num_levels* reconstruction levels.
+
+    Returns
+    -------
+    centroids   : ndarray of shape (num_levels,)
+    boundaries  : ndarray of shape (num_levels + 1,)  (-inf ... +inf)
+    """
+    k = num_levels
+    centroids = np.array([sigma * norm.ppf((2 * i + 1) / (2 * k)) for i in range(k)])
+
+    for _ in range(max_iter):
+        boundaries = np.empty(k + 1)
+        boundaries[0] = -np.inf
+        boundaries[k] = np.inf
+        for i in range(1, k):
+            boundaries[i] = (centroids[i - 1] + centroids[i]) / 2.0
+
+        new_centroids = np.empty(k)
+        for i in range(k):
+            lo, hi = boundaries[i], boundaries[i + 1]
+            lo_c = max(lo, -6 * sigma)
+            hi_c = min(hi, 6 * sigma)
+            num = norm.expect(lambda x: x, loc=0, scale=sigma, lb=lo_c, ub=hi_c)
+            den = norm.cdf(hi, scale=sigma) - norm.cdf(lo, scale=sigma)
+            new_centroids[i] = num / den if den > 1e-15 else (lo_c + hi_c) / 2.0
+
+        if np.allclose(centroids, new_centroids, atol=1e-12):
+            break
+        centroids = new_centroids
+
+    # Final boundaries
+    boundaries = np.empty(k + 1)
+    boundaries[0] = -np.inf
+    boundaries[k] = np.inf
+    for i in range(1, k):
+        boundaries[i] = (centroids[i - 1] + centroids[i]) / 2.0
+
+    return centroids, boundaries
+
+
+# ---------------------------------------------------------------------------
+# Rotation matrix
+# ---------------------------------------------------------------------------
+
+def gen_rotation_matrix(quant_dim: int, max_dim: int, seed: int) -> np.ndarray:
+    """
+    Generate a random orthogonal matrix via QR decomposition of a Gaussian
+    matrix, then return its first *quant_dim* rows.
+
+    The full matrix is (max_dim x max_dim); we only retain the first
+    quant_dim rows so the output shape is (quant_dim, max_dim).
+
+    Uses the legacy numpy.random API (np.random.seed + np.random.randn) so
+    that the output is bit-for-bit identical to the shipped hnswtq.c.
+    """
+    np.random.seed(seed)
+    G = np.random.randn(max_dim, max_dim).astype(np.float32)
+    Q, R_mat = np.linalg.qr(G)
+    # Make the decomposition unique by flipping signs so diag(R) > 0
+    diag_sign = np.sign(np.diag(R_mat)).astype(np.float32)
+    diag_sign[diag_sign == 0] = 1.0
+    Q = (Q * diag_sign[np.newaxis, :]).astype(np.float32)
+
+    # Sanity check: rows should be mutually orthonormal
+    sub = Q[:quant_dim, :]
+    err = float(np.max(np.abs(sub @ sub.T - np.eye(quant_dim))))
+    if err > 1e-4:
+        print(f"[WARNING] Orthogonality error {err:.2e} exceeds 1e-4 — "
+              "check numpy/LAPACK version.", file=sys.stderr)
+
+    return sub  # shape: (quant_dim, max_dim)
+
+
+# ---------------------------------------------------------------------------
+# C file emitter
+# ---------------------------------------------------------------------------
+
+def c_float_literal(x: float) -> str:
+    return f"{x:.8e}f"
+
+
+def emit_c_file(out_path: str, Q: np.ndarray, quant_dim: int, max_dim: int,
+                bit_width: int, seed: int):
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    py_ver = platform.python_version()
+    np_ver = np.__version__
+
+    num_levels = 2 ** bit_width
+    centroids, boundaries = lloyd_max_gaussian(num_levels, sigma=1.0)
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("/*\n")
+        f.write(" * hnswtq.c — Auto-generated TurboQuant constants for pgvector (HNSW)\n")
+        f.write(" *\n")
+        f.write(f" * Generated : {ts}\n")
+        f.write(f" * Arguments : quant_dim={quant_dim}, max_dim={max_dim}, "
+                f"bit_width={bit_width}, seed={seed}\n")
+        f.write(f" * Python    : {py_ver}\n")
+        f.write(f" * NumPy     : {np_ver}\n")
+        f.write(" *\n")
+        f.write(" * This file is generated by generate_hnswtq.py. Do not edit manually.\n")
+        f.write(" */\n\n")
+
+        f.write("#include \"hnswtq.h\"\n\n")
+
+        # Print codebook as a comment for documentation
+        f.write("/*\n")
+        f.write(f" * Lloyd-Max codebook for N(0,1) with {num_levels} levels "
+                f"(bit_width={bit_width}):\n")
+        f.write(f" *   centroids  = [{', '.join(f'{c:.8f}' for c in centroids)}]\n")
+        finite_bounds = boundaries[1:-1]
+        f.write(f" *   boundaries = [{', '.join(f'{b:.8f}' for b in finite_bounds)}]\n")
+        f.write(" *\n")
+        f.write(" * These values are embedded as macros in hnswtq.h (HNSW_TQ_CENTROID_*,\n")
+        f.write(" * HNSW_TQ_BOUNDARY_*) and are not repeated here.\n")
+        f.write(" */\n\n")
+
+        # Rotation matrix
+        f.write("/*\n")
+        f.write(f" * Random rotation matrix: first {quant_dim} rows of a {max_dim}x{max_dim}\n")
+        f.write(f" * orthogonal matrix Q obtained by QR decomposition of a Gaussian matrix\n")
+        f.write(f" * (numpy seed={seed}).  Shape: [{quant_dim}][{max_dim}].\n")
+        f.write(f" * Orthogonality check (Q[:quant_dim] @ Q[:quant_dim]^T ≈ I_{quant_dim}):\n")
+        sub = Q[:quant_dim, :]
+        err = float(np.max(np.abs(sub @ sub.T - np.eye(quant_dim))))
+        f.write(f" *   max |QQ^T - I| = {err:.2e}\n")
+        f.write(" */\n")
+        f.write(f"const float hnsw_tq_rotation"
+                f"[HNSW_TQ_QUANT_DIM_MAX][HNSW_MAX_DIM] = {{\n")
+
+        for i in range(quant_dim):
+            row = Q[i]
+            f.write(f"\t/* row {i} */\n\t{{")
+            vals = [c_float_literal(v) for v in row]
+            # 10 values per line, indented
+            for j, v in enumerate(vals):
+                if j % 10 == 0 and j > 0:
+                    f.write(",\n\t ")
+                elif j > 0:
+                    f.write(", ")
+                f.write(v)
+            f.write("}")
+            if i < quant_dim - 1:
+                f.write(",")
+            f.write("\n")
+
+        f.write("};\n")
+
+    print(f"[generate_hnswtq.py] wrote: {out_path} "
+          f"(quant_dim={quant_dim}, max_dim={max_dim}, seed={seed})")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Generate pgvector/src/hnswtq.c with TurboQuant rotation matrix."
+    )
+    ap.add_argument(
+        "--quant-dim", type=int, default=48,
+        help="number of rotation rows to keep (default: 48, fits 96 bits at b=2)"
+    )
+    ap.add_argument(
+        "--max-dim", type=int, default=2000,
+        help="maximum vector dimension, must match HNSW_MAX_DIM (default: 2000)"
+    )
+    ap.add_argument(
+        "--bit-width", type=int, default=2,
+        help="Lloyd-Max quantization bit-width (default: 2 => 4 levels)"
+    )
+    ap.add_argument(
+        "--seed", type=int, default=42,
+        help="numpy RNG seed for reproducibility (default: 42)"
+    )
+    ap.add_argument(
+        "--out", type=str, required=True,
+        help="output C file path (e.g., ../pgvector/src/hnswtq.c)"
+    )
+    args = ap.parse_args()
+
+    if args.quant_dim <= 0 or args.max_dim <= 0:
+        print("--quant-dim and --max-dim must be positive", file=sys.stderr)
+        sys.exit(1)
+    if args.quant_dim > args.max_dim:
+        print("--quant-dim must be <= --max-dim", file=sys.stderr)
+        sys.exit(1)
+    if args.bit_width not in (1, 2, 3, 4):
+        print("--bit-width must be one of 1, 2, 3, 4", file=sys.stderr)
+        sys.exit(1)
+
+    Q = gen_rotation_matrix(args.quant_dim, args.max_dim, args.seed)
+    emit_c_file(args.out, Q, args.quant_dim, args.max_dim, args.bit_width, args.seed)
+
+
+if __name__ == "__main__":
+    main()
