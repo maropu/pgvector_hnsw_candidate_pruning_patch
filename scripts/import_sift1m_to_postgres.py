@@ -3,21 +3,109 @@
 """
 import_sift1m_to_postgres.py
 
- - Download and cache the TexMex SIFT archive from: ftp://ftp.irisa.fr/local/texmex/corpus/sift.tar.gz
- - Reuse the cached tarball and extracted files on subsequent runs
- - Stream a chosen split (.fvecs) into a Postgres table with pgvector via COPY
- - Always CREATE TABLE (fail if it already exists)
- - No index creation
+Downloads a TexMex SIFT dataset from FTP, caches it locally, and streams one
+split (base / learn / query) into a PostgreSQL table using the pgvector
+extension.  Designed to be called by import_sift1m_to_postgres.sh inside the
+Docker initdb sequence, but also usable standalone from the host or any
+container that can reach the PostgreSQL Unix socket on port 5432.
 
-Usage:
-  python load_sift_from_ftp_to_pgvector.py \
-    --dbname postgres \
-    --user postgres \
-    --subset base \
-    --table public.sift1m \
-    --column embedding \
-    --batch-rows 20000 \
+-----------------------------------------------------------------------------
+WHAT THIS SCRIPT DOES
+-----------------------------------------------------------------------------
+1. Downloads the dataset archive (FTP) to --cache-dir if not already cached.
+2. Extracts the tarball into --cache-dir if the .fvecs files are not already
+   present.
+3. Opens a psycopg connection via Unix socket (no host, fixed port 5432).
+4. Creates the pgvector extension if missing.
+5. Creates a new table with a bigserial PRIMARY KEY and a vector(N) column.
+   Raises an error if the table already exists (no upsert / truncate logic).
+6. Streams all rows from the chosen .fvecs split into the table via COPY.
+   No index is created — index creation is handled separately by
+   create_hnsw_index.sh.
+
+-----------------------------------------------------------------------------
+SUPPORTED DATASETS  (--dataset)
+-----------------------------------------------------------------------------
+  sift1m    (default)
+    1,000,000 base vectors, 128 dimensions, float32
+    Archive : ftp://ftp.irisa.fr/local/texmex/corpus/sift.tar.gz  (~161 MB)
+    Splits  : base (1 M rows)  |  learn (100 K rows)  |  query (10 K rows)
+
+  siftsmall
+    10,000 base vectors, 128 dimensions, float32
+    Archive : ftp://ftp.irisa.fr/local/texmex/corpus/siftsmall.tar.gz  (~3 MB)
+    Splits  : base (10 K rows)  |  learn (25 K rows)  |  query (100 rows)
+    Recommended for quick smoke-tests and patch iteration.
+
+-----------------------------------------------------------------------------
+ARGUMENTS
+-----------------------------------------------------------------------------
+  --dbname      (required) Target PostgreSQL database name.
+  --user        PostgreSQL user name. Default: postgres
+  --dataset     Dataset variant: sift1m | siftsmall. Default: sift1m
+  --subset      Which split to load: base | learn | query. Default: base
+  --table       Destination table name (schema-qualified OK, e.g. public.sift1m).
+                Default: sift1m
+  --column      Name of the vector column. Default: embedding
+  --cache-dir   Directory used to cache the downloaded archive and extracted
+                .fvecs files across runs. Default: /tmp/sift_texmex
+  --batch-rows  Progress-log interval (rows). Default: 10000
+  --verbose     Print download / extract / copy progress to stdout.
+
+-----------------------------------------------------------------------------
+USAGE EXAMPLES
+-----------------------------------------------------------------------------
+  # Load sift1m base split (production default)
+  python import_sift1m_to_postgres.py \
+    --dbname postgres --user postgres \
+    --dataset sift1m --subset base \
+    --table sift1m --column embedding \
     --verbose
+
+  # Load siftsmall base split (fast dev/test)
+  python import_sift1m_to_postgres.py \
+    --dbname postgres --user postgres \
+    --dataset siftsmall --subset base \
+    --table sift1m --column embedding \
+    --verbose
+
+  # Load query split into a separate table
+  python import_sift1m_to_postgres.py \
+    --dbname postgres --user postgres \
+    --dataset sift1m --subset query \
+    --table sift1m_query --column embedding \
+    --verbose
+
+-----------------------------------------------------------------------------
+SCHEMA CREATED
+-----------------------------------------------------------------------------
+  CREATE TABLE <table> (
+    id       bigserial PRIMARY KEY,
+    <column> vector(<dim>)
+  );
+  -- dim = 128 for both sift1m and siftsmall
+
+-----------------------------------------------------------------------------
+ERROR CONDITIONS
+-----------------------------------------------------------------------------
+  - Table already exists          → psycopg raises DuplicateTable; re-run
+                                    after DROP TABLE <table>.
+  - FTP unreachable               → urllib raises URLError.
+  - Corrupt / incomplete archive  → tarfile / struct raises an exception.
+  - pgvector extension missing    → script auto-runs CREATE EXTENSION vector;
+                                    fails only if the .so is not installed.
+
+-----------------------------------------------------------------------------
+CACHING BEHAVIOUR
+-----------------------------------------------------------------------------
+  Both the .tar.gz archive and the extracted .fvecs directory are reused on
+  subsequent runs.  Delete --cache-dir (or the specific archive/directory
+  inside it) to force a fresh download or re-extraction.
+  Default cache layout:
+    <cache-dir>/sift.tar.gz          (sift1m archive)
+    <cache-dir>/sift/                (sift1m extracted files)
+    <cache-dir>/siftsmall.tar.gz     (siftsmall archive)
+    <cache-dir>/siftsmall/           (siftsmall extracted files)
 """
 
 from __future__ import annotations
@@ -33,18 +121,30 @@ import psycopg
 from psycopg import sql as psql
 
 
-TEXMEX_URL = "ftp://ftp.irisa.fr/local/texmex/corpus/sift.tar.gz"
-
 DEFAULT_CACHE_DIR = Path("/tmp/sift_texmex")
 
-ARCHIVE_NAME = "sift.tar.gz"
-
-EXTRACTED_DIRNAME = "sift"  # inside the tarball
-
-SPLIT_TO_FILENAME = {
-    "base":  "sift_base.fvecs",
-    "learn": "sift_learn.fvecs",
-    "query": "sift_query.fvecs",
+# Per-dataset configuration: URL, archive name, extracted dir, split filenames
+DATASET_CONFIG = {
+    "sift1m": {
+        "url":       "ftp://ftp.irisa.fr/local/texmex/corpus/sift.tar.gz",
+        "archive":   "sift.tar.gz",
+        "extracted": "sift",
+        "splits": {
+            "base":  "sift_base.fvecs",
+            "learn": "sift_learn.fvecs",
+            "query": "sift_query.fvecs",
+        },
+    },
+    "siftsmall": {
+        "url":       "ftp://ftp.irisa.fr/local/texmex/corpus/siftsmall.tar.gz",
+        "archive":   "siftsmall.tar.gz",
+        "extracted": "siftsmall",
+        "splits": {
+            "base":  "siftsmall_base.fvecs",
+            "learn": "siftsmall_learn.fvecs",
+            "query": "siftsmall_query.fvecs",
+        },
+    },
 }
 
 
@@ -56,6 +156,10 @@ def parse_args() -> argparse.Namespace:
     # Connection (Unix socket; fixed port 5432)
     ap.add_argument("--dbname", required=True, help="Target database name")
     ap.add_argument("--user", default="postgres", help="User name (default: postgres)")
+
+    # Dataset variant
+    ap.add_argument("--dataset", choices=list(DATASET_CONFIG.keys()), default="sift1m",
+                    help="Which TexMex dataset to load: sift1m (1M vectors) or siftsmall (10K vectors) (default: sift1m)")
 
     # Dataset split & cache
     ap.add_argument("--subset", choices=["base", "learn", "query"], default="base",
@@ -103,7 +207,8 @@ def download_if_missing(url: str, dst: Path, verbose: bool) -> None:
         print(f"[download] Completed: {dst}")
 
 
-def extract_tar_gz_if_missing(archive: Path, out_dir: Path, verbose: bool) -> Path:
+def extract_tar_gz_if_missing(archive: Path, out_dir: Path, extracted_dirname: str,
+                              split_filenames: dict, verbose: bool) -> Path:
     """
     Extract the .tar.gz if the extracted root doesn't already contain expected .fvecs.
     Returns the extracted root directory path (e.g., /tmp/sift_texmex/sift).
@@ -111,8 +216,8 @@ def extract_tar_gz_if_missing(archive: Path, out_dir: Path, verbose: bool) -> Pa
     if archive.suffixes[-2:] != [".tar", ".gz"]:
         raise ValueError(f"Only .tar.gz is supported: {archive}")
 
-    extracted_root = out_dir / EXTRACTED_DIRNAME
-    expected = {filename for filename in SPLIT_TO_FILENAME.values()}
+    extracted_root = out_dir / extracted_dirname
+    expected = set(split_filenames.values())
     if extracted_root.exists():
         have = {p.name for p in extracted_root.glob("*.fvecs")}
         if expected.issubset(have):
@@ -129,9 +234,9 @@ def extract_tar_gz_if_missing(archive: Path, out_dir: Path, verbose: bool) -> Pa
     return extracted_root
 
 
-def get_split_path(extracted_root: Path, subset: str) -> Path:
+def get_split_path(extracted_root: Path, subset: str, split_filenames: dict) -> Path:
     """Resolve the target .fvecs path for the requested split."""
-    fname = SPLIT_TO_FILENAME[subset]
+    fname = split_filenames[subset]
     fpath = extracted_root / fname
     if not fpath.exists():
         raise FileNotFoundError(f"Split file not found: {fpath}")
@@ -222,19 +327,22 @@ def copy_vectors(conn: psycopg.Connection,
 
 def main():
     args = parse_args()
+    cfg = DATASET_CONFIG[args.dataset]
     cache_dir: Path = args.cache_dir
     ensure_cache_dirs(cache_dir)
 
-    archive_path = cache_dir / ARCHIVE_NAME
+    archive_path = cache_dir / cfg["archive"]
 
     # Download .tar.gz if missing; reuse otherwise
-    download_if_missing(TEXMEX_URL, archive_path, args.verbose)
+    download_if_missing(cfg["url"], archive_path, args.verbose)
 
     # Extract if needed; reuse otherwise (.tar.gz only)
-    extracted_root = extract_tar_gz_if_missing(archive_path, cache_dir, args.verbose)
+    extracted_root = extract_tar_gz_if_missing(
+        archive_path, cache_dir, cfg["extracted"], cfg["splits"], args.verbose
+    )
 
     # Resolve the path to the requested split (.fvecs)
-    fvecs_path = get_split_path(extracted_root, args.subset)
+    fvecs_path = get_split_path(extracted_root, args.subset, cfg["splits"])
     if args.verbose:
         print(f"[cache] Using split file: {fvecs_path}")
 

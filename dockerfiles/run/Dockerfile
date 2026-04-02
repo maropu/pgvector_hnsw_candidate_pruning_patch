@@ -3,55 +3,174 @@
 # pgvector run image w/ candidate pruning patch + SIFT1M dataset
 #
 # Builds pgvector from source with the specified patch applied, installs it
-# into a standard postgres image, and loads the SIFT1M dataset on first start.
+# into a standard postgres image, and loads the SIFT1M (or siftsmall) dataset
+# on first container start.
 #
-# Requirements:
-#   - Docker BuildKit (for `ADD <git-url>#<ref>`)
+# =============================================================================
+# WHAT THIS DOCKERFILE DOES
+# =============================================================================
+# Build stage  (AS build):
+#   1. Installs build tools (gcc, make, postgresql-server-dev) via apt.
+#   2. Fetches pgvector source at the specified git ref from GitHub (BuildKit).
+#   3. Copies the patch file from the repository root into the source tree.
+#   4. Dry-runs the patch for early diagnostics, then applies it.
+#   5. Compiles vector.so and installs extension files into /pkgroot (DESTDIR).
 #
-# Build:
+# Runtime stage  (AS run):
+#   6. Installs Python 3 + psycopg[binary] in a venv (/opt/sift-venv) for the
+#      SIFT data-loading script, and tini as PID 1.
+#   7. Copies vector.so and .sql/.control extension files from the build stage.
+#   8. Places four initdb scripts in /docker-entrypoint-initdb.d/ that run in
+#      order on the very first container start:
+#        00-configure-postgres.sh  — applies shared_buffers / maintenance_work_mem
+#        10-vector.sql             — CREATE EXTENSION vector
+#        20-load-sift1m.sh         — downloads and loads SIFT dataset
+#        30-create-hnsw-index.sh   — builds HNSW index on the base table
+#
+# =============================================================================
+# REQUIREMENTS
+# =============================================================================
+#   - Docker with BuildKit enabled (required for ADD <git-url>#<ref>).
+#     BuildKit is the default in Docker 23+; for older versions set:
+#       DOCKER_BUILDKIT=1
+#   - Build context must be the repository root (contains the .patch file).
+#   - Internet access at build time to fetch pgvector source from GitHub.
+#   - Internet access at first container start to download the SIFT archive
+#     from ftp://ftp.irisa.fr (unless SIFT_CACHE_DIR is pre-populated).
+#
+# =============================================================================
+# BUILD ARGUMENTS
+# =============================================================================
+#   PG_MAJOR      PostgreSQL major version.  Default: 17
+#   PGVECTOR_REF  pgvector git ref (tag or commit SHA).  Default: v0.8.0
+#   PATCH_FILE    Patch filename (must exist in the repository root).
+#                 Default: pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch
+#                 Available patches (see repo root):
+#                   pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch
+#                   pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch
+#                   pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch
+#
+# =============================================================================
+# BUILD EXAMPLES
+# =============================================================================
+#   # simhash patch (recommended naming: pg17-simhash)
 #   docker build \
-#     --build-arg PG_MAJOR=17 \
-#     --build-arg PGVECTOR_REF=v0.8.0 \
+#     --build-arg PATCH_FILE=pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch \
+#     -t pgvector-run:pg17-simhash \
+#     -f dockerfiles/run/Dockerfile .
+#
+#   # turboquant patch
+#   docker build \
 #     --build-arg PATCH_FILE=pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch \
 #     -t pgvector-run:pg17-turboquant \
-#     -f dockerfiles/run/Dockerfile \
-#     .
+#     -f dockerfiles/run/Dockerfile .
 #
-# Run:
+#   # Different PostgreSQL version
+#   docker build \
+#     --build-arg PG_MAJOR=16 \
+#     --build-arg PATCH_FILE=pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch \
+#     -t pgvector-run:pg16-simhash \
+#     -f dockerfiles/run/Dockerfile .
+#
+# =============================================================================
+# LAYER CACHING NOTE (patch iteration)
+# =============================================================================
+#   apt-get and the GitHub source fetch are ordered BEFORE COPY ${PATCH_FILE},
+#   so those layers remain cached even when the patch file changes.  Only the
+#   patch-apply and make steps re-run on each patch iteration.
+#
+# =============================================================================
+# RUNTIME ENVIRONMENT VARIABLES
+# =============================================================================
+#   POSTGRES_PASSWORD       (required) PostgreSQL superuser password.
+#
+#   PG_SHARED_BUFFERS       PostgreSQL shared_buffers.  Default: "4GB"
+#   PG_MAINTENANCE_WORK_MEM PostgreSQL maintenance_work_mem.  Default: "1GB"
+#
+#   SIFT_DATASET    Dataset to load on first start.
+#                     sift1m    : 1,000,000 vectors, 128 dims, ~161 MB  (default)
+#                     siftsmall : 10,000 vectors, 128 dims,  ~3 MB  (dev/test)
+#
+#   SIFT_SUBSETS    Space-separated list of splits to load.
+#                   Values: base  query  learn  (any combination)
+#                   Set to "" to skip all data loading.
+#                   Default: "base"
+#
+#   SIFT_TABLE      Base table name (default: sift1m).
+#                   "base" split  -> sift1m
+#                   Other splits  -> sift1m_query, sift1m_learn
+#
+#   SIFT_COLUMN     Vector column name (default: embedding).
+#
+#   SIFT_CACHE_DIR  Path inside the container for caching the downloaded
+#                   archive and extracted .fvecs files.
+#                   Default: /var/lib/postgresql/sift_cache
+#                   To persist across runs, bind-mount a host directory
+#                   writable by UID 999 (the postgres user):
+#                     -v /local/cache:/sift_cache -e SIFT_CACHE_DIR=/sift_cache
+#
+# =============================================================================
+# RUN EXAMPLES
+# =============================================================================
+#   # Production: load sift1m base split and build HNSW index
 #   docker run --rm \
 #     -e POSTGRES_PASSWORD=postgres \
 #     -e SIFT_SUBSETS="base" \
 #     -p 5432:5432 \
-#     pgvector-run:pg17-turboquant
+#     pgvector-run:pg17-simhash
 #
-# Environment variables:
-#   POSTGRES_PASSWORD  (required) PostgreSQL superuser password
-#   SIFT_SUBSETS       Space-separated list of SIFT splits to load on first
-#   PG_SHARED_BUFFERS       Passed to configure_postgres.sh; default: "4GB"
-#   PG_MAINTENANCE_WORK_MEM Passed to configure_postgres.sh; default: "1GB"
-#                      start: "base", "query", and/or "learn".
-#                      Default: "base"
-#                      Set to "" (empty) to skip dataset loading.
-#   SIFT_TABLE         Destination table name (default: sift1m)
-#   SIFT_COLUMN        Vector column name (default: embedding)
-#   SIFT_CACHE_DIR     Host path to cache the downloaded archive
-#                      (mount as -v /local/path:/sift_cache for reuse)
+#   # Dev/test: use siftsmall for fast startup (~3 MB download, seconds to load)
+#   docker run --rm \
+#     -e POSTGRES_PASSWORD=postgres \
+#     -e SIFT_DATASET=siftsmall \
+#     -e SIFT_SUBSETS="base" \
+#     -p 5432:5432 \
+#     pgvector-run:pg17-simhash
 #
-# Connect:
-#   psql -h localhost -U postgres
-#   \dt          -- shows sift1m table after loading
+#   # Skip data loading entirely (PostgreSQL + pgvector only)
+#   docker run --rm \
+#     -e POSTGRES_PASSWORD=postgres \
+#     -e SIFT_SUBSETS="" \
+#     -p 5432:5432 \
+#     pgvector-run:pg17-simhash
 #
-# Restart PostgreSQL inside the container (without stopping the container):
-#   tini is PID 1, so postgres is a child process and pg_ctl restart is safe.
+#   # Persist data and reuse SIFT cache across runs
+#   docker run \
+#     -e POSTGRES_PASSWORD=postgres \
+#     -v pgdata:/var/lib/postgresql/data \
+#     -v /local/cache:/sift_cache \
+#     -e SIFT_CACHE_DIR=/sift_cache \
+#     -p 5432:5432 \
+#     pgvector-run:pg17-simhash
+#
+# =============================================================================
+# CONNECT
+# =============================================================================
+#   psql -h 127.0.0.1 -U postgres --password
+#   \dt          -- lists tables (sift1m appears after loading completes)
+#
+#   -- Check index build progress while loading:
+#   SELECT phase, blocks_done, blocks_total,
+#          round(100.0 * blocks_done / NULLIF(blocks_total,0), 1) AS pct
+#   FROM pg_stat_progress_create_index;
+#
+# =============================================================================
+# RESTART PostgreSQL WITHOUT STOPPING THE CONTAINER
+# =============================================================================
+#   tini is PID 1; postgres runs as its child, so pg_ctl restart is safe.
+#
 #   docker exec -u postgres <container> \
 #     /usr/lib/postgresql/17/bin/pg_ctl restart -D /var/lib/postgresql/data
 #
-# Notes:
-#   - SIFT1M download (~165 MB) happens at container first-start time.
-#     Mount -v /local/cache:/sift_cache to reuse across runs.
-#   - ABI compatibility: the build uses the same postgres:<major>-bookworm
-#     base image as the final stage, ensuring vector.so is ABI-compatible.
-#   - Data persistence: use -v pgdata:/var/lib/postgresql/data
+# =============================================================================
+# NOTES
+# =============================================================================
+#   - SIFT download happens at first container start, not at build time.
+#     Use SIFT_CACHE_DIR bind-mount to avoid re-downloading across runs.
+#   - ABI compatibility: build stage and runtime stage share the same
+#     postgres:<major>-bookworm base image, ensuring vector.so is compatible.
+#   - Data persistence: use -v pgdata:/var/lib/postgresql/data to survive
+#     container removal.
 
 ARG PG_MAJOR=17
 ARG PGVECTOR_REF=v0.8.0
@@ -63,15 +182,10 @@ ARG PG_MAJOR
 ARG PGVECTOR_REF
 ARG PATCH_FILE
 
-# Fetch pgvector source at the specified git ref using BuildKit remote git context
-ADD https://github.com/pgvector/pgvector.git#${PGVECTOR_REF} /tmp/pgvector
-
-# Copy the patch file from the repository root (build context)
-COPY ${PATCH_FILE} /tmp/pgvector/
-
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# Install build dependencies
+# Install build dependencies before copying the patch so this layer is cached
+# even when the patch file changes.
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update; \
@@ -83,6 +197,12 @@ RUN set -eux; \
       patch; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
+
+# Fetch pgvector source at the specified git ref using BuildKit remote git context
+ADD https://github.com/pgvector/pgvector.git#${PGVECTOR_REF} /tmp/pgvector
+
+# Copy the patch file from the repository root (build context)
+COPY ${PATCH_FILE} /tmp/pgvector/
 
 WORKDIR /tmp/pgvector
 
@@ -156,6 +276,7 @@ RUN set -eux; \
 # host directory that is writable by UID 999 (the postgres user).
 ENV PG_SHARED_BUFFERS="4GB" \
     PG_MAINTENANCE_WORK_MEM="1GB" \
+    SIFT_DATASET="sift1m" \
     SIFT_SUBSETS="base" \
     SIFT_TABLE="sift1m" \
     SIFT_COLUMN="embedding" \
