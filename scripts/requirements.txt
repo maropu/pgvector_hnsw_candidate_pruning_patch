@@ -1,5 +1,6 @@
 # Python: 3.10.16
 numpy==2.2.4
+scipy==1.15.2
 psycopg-binary==3.2.9
 matplotlib==3.10.1
 scikit-learn==1.6.1
