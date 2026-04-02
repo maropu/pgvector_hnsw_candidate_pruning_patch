@@ -157,6 +157,10 @@ RUN echo "CREATE EXTENSION IF NOT EXISTS vector;" \
 COPY --chmod=755 scripts/import_sift1m_to_postgres.sh \
      /docker-entrypoint-initdb.d/20-load-sift1m.sh
 
+# initdb script 3: create HNSW index on the base table (runs after data load)
+COPY --chmod=755 scripts/create_hnsw_index.sh \
+     /docker-entrypoint-initdb.d/30-create-hnsw-index.sh
+
 # Create the default cache directory and give it to the postgres user *before*
 # the VOLUME declaration.  Docker copies the layer content (including ownership)
 # when initialising the anonymous volume, so the postgres user can write there.
