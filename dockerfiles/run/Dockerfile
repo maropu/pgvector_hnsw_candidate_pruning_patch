@@ -27,7 +27,8 @@
 # Environment variables:
 #   POSTGRES_PASSWORD  (required) PostgreSQL superuser password
 #   SIFT_SUBSETS       Space-separated list of SIFT splits to load on first
-#   PG_SHARED_BUFFERS  Passed to configure_postgres.sh; default: "4GB"
+#   PG_SHARED_BUFFERS       Passed to configure_postgres.sh; default: "4GB"
+#   PG_MAINTENANCE_WORK_MEM Passed to configure_postgres.sh; default: "4GB"
 #                      start: "base", "query", and/or "learn".
 #                      Default: "base"
 #                      Set to "" (empty) to skip dataset loading.
@@ -146,6 +147,7 @@ RUN set -eux; \
 # Override at runtime with -e SIFT_CACHE_DIR=/sift_cache when you mount a
 # host directory that is writable by UID 999 (the postgres user).
 ENV PG_SHARED_BUFFERS="4GB" \
+    PG_MAINTENANCE_WORK_MEM="4GB" \
     SIFT_SUBSETS="base" \
     SIFT_TABLE="sift1m" \
     SIFT_COLUMN="embedding" \
