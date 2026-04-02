@@ -82,8 +82,8 @@ def parse_args() -> argparse.Namespace:
                     help="PostgreSQL port (default: 5432)")
     ap.add_argument("--user", default="postgres",
                     help="PostgreSQL user (default: postgres)")
-    ap.add_argument("--password", default=None,
-                    help="PostgreSQL password (default: none)")
+    ap.add_argument("--password", default="postgres",
+                    help="PostgreSQL password (default: postgres)")
     ap.add_argument("--dbname", default="postgres",
                     help="PostgreSQL database name (default: postgres)")
     ap.add_argument("--dataset", default="sift-128-euclidean",
