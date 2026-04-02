@@ -142,7 +142,7 @@ RUN set -eux; \
 # postgres user can write there without needing host-side chmod.
 # Override at runtime with -e SIFT_CACHE_DIR=/sift_cache when you mount a
 # host directory that is writable by UID 999 (the postgres user).
-ENV SIFT_SUBSETS="base query" \
+ENV SIFT_SUBSETS="base" \
     SIFT_TABLE="sift1m" \
     SIFT_COLUMN="embedding" \
     SIFT_CACHE_DIR="/var/lib/postgresql/sift_cache"
@@ -155,7 +155,7 @@ RUN echo "CREATE EXTENSION IF NOT EXISTS vector;" \
 # Runs as the postgres user; connects via Unix socket (no password needed).
 # Skipped when SIFT_SUBSETS is empty.
 COPY --chmod=755 scripts/import_sift1m_to_postgres.sh \
-     /docker-entrypoint-initdb.d/import_sift1m_to_postgres.sh
+     /docker-entrypoint-initdb.d/20-load-sift1m.sh
 
 # Create the default cache directory and give it to the postgres user *before*
 # the VOLUME declaration.  Docker copies the layer content (including ownership)
