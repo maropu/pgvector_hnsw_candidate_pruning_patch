@@ -155,7 +155,7 @@ RUN echo "CREATE EXTENSION IF NOT EXISTS vector;" \
 # Runs as the postgres user; connects via Unix socket (no password needed).
 # Skipped when SIFT_SUBSETS is empty.
 COPY --chmod=755 scripts/import_sift1m_to_postgres.sh \
-     /docker-entrypoint-initdb.d/20-load-sift1m.sh
+     /docker-entrypoint-initdb.d/import_sift1m_to_postgres.sh
 
 # Create the default cache directory and give it to the postgres user *before*
 # the VOLUME declaration.  Docker copies the layer content (including ownership)
