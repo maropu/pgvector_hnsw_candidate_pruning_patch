@@ -155,7 +155,7 @@ RUN set -eux; \
 # Override at runtime with -e SIFT_CACHE_DIR=/sift_cache when you mount a
 # host directory that is writable by UID 999 (the postgres user).
 ENV PG_SHARED_BUFFERS="4GB" \
-    PG_MAINTENANCE_WORK_MEM="4GB" \
+    PG_MAINTENANCE_WORK_MEM="1GB" \
     SIFT_SUBSETS="base" \
     SIFT_TABLE="sift1m" \
     SIFT_COLUMN="embedding" \

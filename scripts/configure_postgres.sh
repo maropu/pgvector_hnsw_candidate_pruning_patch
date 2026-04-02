@@ -12,7 +12,7 @@
 set -euo pipefail
 
 : "${PG_SHARED_BUFFERS:=4GB}"
-: "${PG_MAINTENANCE_WORK_MEM:=4GB}"
+: "${PG_MAINTENANCE_WORK_MEM:=1GB}"
 
 cat >> "${PGDATA}/postgresql.conf" <<EOF
 
