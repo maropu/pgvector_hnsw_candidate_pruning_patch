@@ -28,7 +28,7 @@
 #   POSTGRES_PASSWORD  (required) PostgreSQL superuser password
 #   SIFT_SUBSETS       Space-separated list of SIFT splits to load on first
 #   PG_SHARED_BUFFERS       Passed to configure_postgres.sh; default: "4GB"
-#   PG_MAINTENANCE_WORK_MEM Passed to configure_postgres.sh; default: "4GB"
+#   PG_MAINTENANCE_WORK_MEM Passed to configure_postgres.sh; default: "1GB"
 #                      start: "base", "query", and/or "learn".
 #                      Default: "base"
 #                      Set to "" (empty) to skip dataset loading.
