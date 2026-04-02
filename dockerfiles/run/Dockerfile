@@ -137,15 +137,22 @@ RUN set -eux; \
     test -f "$(pg_config --pkglibdir)/vector.so"; \
     echo "pgvector extension installed successfully."
 
-# Default environment variables for SIFT loading.
+# Default environment variables.
+# PG_SHARED_BUFFERS: passed to configure_postgres.sh; override at runtime with
+#   -e PG_SHARED_BUFFERS=8GB
 # SIFT_CACHE_DIR defaults to a path inside the postgres data volume so the
 # postgres user can write there without needing host-side chmod.
 # Override at runtime with -e SIFT_CACHE_DIR=/sift_cache when you mount a
 # host directory that is writable by UID 999 (the postgres user).
-ENV SIFT_SUBSETS="base" \
+ENV PG_SHARED_BUFFERS="4GB" \
+    SIFT_SUBSETS="base" \
     SIFT_TABLE="sift1m" \
     SIFT_COLUMN="embedding" \
     SIFT_CACHE_DIR="/var/lib/postgresql/sift_cache"
+
+# initdb script 0: apply PostgreSQL tuning parameters (runs first)
+COPY --chmod=755 scripts/configure_postgres.sh \
+     /docker-entrypoint-initdb.d/00-configure-postgres.sh
 
 # initdb script 1: create the vector extension
 RUN echo "CREATE EXTENSION IF NOT EXISTS vector;" \
