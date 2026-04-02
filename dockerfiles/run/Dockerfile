@@ -41,6 +41,11 @@
 #   psql -h localhost -U postgres
 #   \dt          -- shows sift1m table after loading
 #
+# Restart PostgreSQL inside the container (without stopping the container):
+#   tini is PID 1, so postgres is a child process and pg_ctl restart is safe.
+#   docker exec -u postgres <container> \
+#     /usr/lib/postgresql/17/bin/pg_ctl restart -D /var/lib/postgresql/data
+#
 # Notes:
 #   - SIFT1M download (~165 MB) happens at container first-start time.
 #     Mount -v /local/cache:/sift_cache to reuse across runs.
