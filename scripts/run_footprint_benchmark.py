@@ -20,6 +20,7 @@ Usage:
       --dataset sift1m \
       --dbname postgres \
       --user maropu \
+      --password secret \
       --table sift1m \
       --embedding-col embedding \
       --ef 10,40,120,400,800 \
@@ -100,6 +101,7 @@ def parse_args() -> argparse.Namespace:
     )
     ap.add_argument("--dbname", required=True, help="Target database name (pgvector+sift1m loaded)")
     ap.add_argument("--user", default="postgres", help="User name (default: postgres)")
+    ap.add_argument("--password", default=None, help="Password (default: none)")
     ap.add_argument("--table", default="sift1m", help="Data table name (default: sift1m)")
     ap.add_argument("--embedding-col", default="embedding", help="Vector column name (default: embedding)")
     ap.add_argument("--k", type=int, default=3, help="LIMIT K for ANN query (default: 3)")
@@ -327,7 +329,7 @@ def main():
         sys.exit(2)
 
     # Connect via local UNIX socket (host unspecified), port fixed
-    conn = psycopg.connect(dbname=args.dbname, user=args.user, port=5432, autocommit=True)
+    conn = psycopg.connect(dbname=args.dbname, user=args.user, password=args.password, port=5432, autocommit=True)
 
 
     # Resolve dataset preset for query vector
