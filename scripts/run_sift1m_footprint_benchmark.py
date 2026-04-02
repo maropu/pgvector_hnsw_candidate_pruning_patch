@@ -16,18 +16,24 @@ Notes:
   - "total_refs" = shared_hit + shared_read + local_hit + local_read + temp_read
 
 Usage:
-  # Docker container (TCP)
-  python run_sift1m_footprint_benchmark.py \
+  # Docker container (use 127.0.0.1 to avoid IPv6 fallback)
+  python scripts/run_sift1m_footprint_benchmark.py \
       --dataset sift1m \
-      --host localhost \
+      --host 127.0.0.1 \
       --port 5432 \
       --dbname postgres \
       --user postgres \
       --password postgres \
       --table sift1m \
+      --embedding-col embedding \
+      --ef 10,20,40,80,120,200,400,800 \
+      --runs 100 \
+      --series total_refs,shared_read,temp_read \
+      --output_prefix sift1m_hnsw_l2 \
+      --verbose
 
-  # Local UNIX socket (omit --host)
-  python run_sift1m_footprint_benchmark.py \
+  # Local UNIX socket (omit --host/--port/--password)
+  python scripts/run_sift1m_footprint_benchmark.py \
       --dataset sift1m \
       --dbname postgres \
       --user postgres \
