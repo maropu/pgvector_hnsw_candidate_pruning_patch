@@ -154,7 +154,7 @@ RUN echo "CREATE EXTENSION IF NOT EXISTS vector;" \
 # initdb script 2: load SIFT1M dataset
 # Runs as the postgres user; connects via Unix socket (no password needed).
 # Skipped when SIFT_SUBSETS is empty.
-COPY --chmod=755 dockerfiles/run/20-load-sift1m.sh \
+COPY --chmod=755 scripts/import_sift1m_to_postgres.sh \
      /docker-entrypoint-initdb.d/20-load-sift1m.sh
 
 # Create the default cache directory and give it to the postgres user *before*
