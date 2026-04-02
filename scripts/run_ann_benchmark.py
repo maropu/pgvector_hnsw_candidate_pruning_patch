@@ -150,14 +150,14 @@ def _display(args: argparse.Namespace) -> None:
     true_distances = np.array(dataset["distances"])
     count = args.count
 
-    results = list(load_all_results(args.dataset, count))
-    if not results:
-        print(f"[warn] No result files found under results/{args.dataset}/{count}/",
-              file=sys.stderr)
-        return
-
+    # NOTE: load_all_results is a generator that opens each HDF5 file inside a
+    # `with` block and yields while it is still open.  Converting to list() first
+    # closes the files before we access the datasets, so we must process each
+    # result inside the loop while the file handle is still live.
     rows: list[tuple] = []
-    for properties, run in results:
+    found = False
+    for properties, run in load_all_results(args.dataset, count):
+        found = True
         run_distances = np.array(run["distances"])
         times = np.array(run["times"])
 
@@ -172,6 +172,11 @@ def _display(args: argparse.Namespace) -> None:
 
         name = properties.get("name", properties.get("algo", "?"))
         rows.append((name, float(recall), qps, float(build_time), p50, p95, p99))
+
+    if not found:
+        print(f"[warn] No result files found under results/{args.dataset}/{count}/",
+              file=sys.stderr)
+        return
 
     # Sort by recall descending, then QPS descending
     rows.sort(key=lambda r: (-r[1], -r[2]))
