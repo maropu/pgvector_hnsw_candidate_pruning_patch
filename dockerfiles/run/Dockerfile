@@ -106,7 +106,9 @@ ARG PATCH_FILE
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Install Python3 + psycopg (binary) for the SIFT import script,
-# plus curl/wget for FTP download fallback.
+# plus tini as a minimal init process so postgres is not PID 1.
+# With tini as PID 1, pg_ctl restart works inside the container without
+# stopping it (restarting PID 1 would terminate the container).
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update; \
@@ -114,7 +116,8 @@ RUN set -eux; \
       python3 \
       python3-pip \
       python3-venv \
-      ca-certificates; \
+      ca-certificates \
+      tini; \
     python3 -m venv /opt/sift-venv; \
     /opt/sift-venv/bin/pip install --no-cache-dir "psycopg[binary]"; \
     apt-get clean; \
@@ -189,6 +192,9 @@ LABEL org.opencontainers.image.title="pgvector (patched) + SIFT1M" \
 # Expose default PostgreSQL port
 EXPOSE 5432
 
-# Inherit ENTRYPOINT and CMD from the base postgres image:
-#   ENTRYPOINT ["docker-entrypoint.sh"]
-#   CMD ["postgres"]
+# Override the base image ENTRYPOINT to put tini in front of docker-entrypoint.sh.
+# tini becomes PID 1 and forwards signals; postgres runs as a child process,
+# so `pg_ctl restart` (or `docker exec ... pg_ctl restart`) can restart the
+# PostgreSQL server without terminating the container.
+ENTRYPOINT ["tini", "--", "docker-entrypoint.sh"]
+CMD ["postgres"]
