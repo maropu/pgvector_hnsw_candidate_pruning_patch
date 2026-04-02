@@ -20,15 +20,16 @@
 # Run:
 #   docker run --rm \
 #     -e POSTGRES_PASSWORD=postgres \
-#     -e SIFT_SUBSETS="base query" \
+#     -e SIFT_SUBSETS="base" \
 #     -p 5432:5432 \
 #     pgvector-run:pg17-turboquant
 #
 # Environment variables:
 #   POSTGRES_PASSWORD  (required) PostgreSQL superuser password
 #   SIFT_SUBSETS       Space-separated list of SIFT splits to load on first
+#   PG_SHARED_BUFFERS  Passed to configure_postgres.sh; default: "4GB"
 #                      start: "base", "query", and/or "learn".
-#                      Default: "base query"
+#                      Default: "base"
 #                      Set to "" (empty) to skip dataset loading.
 #   SIFT_TABLE         Destination table name (default: sift1m)
 #   SIFT_COLUMN        Vector column name (default: embedding)
