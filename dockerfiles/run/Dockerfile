@@ -171,6 +171,10 @@
 #     postgres:<major>-bookworm base image, ensuring vector.so is compatible.
 #   - Data persistence: use -v pgdata:/var/lib/postgresql/data to survive
 #     container removal.
+#   - Shared memory: always pass --shm-size=8g (or larger) to docker run.
+#     PostgreSQL shared_buffers (default 4 GB) is backed by POSIX shared memory;
+#     Docker's default /dev/shm is only 64 MB and will cause
+#     "No space left on device" when creating an HNSW index without it.
 
 ARG PG_MAJOR=17
 ARG PGVECTOR_REF=v0.8.0
