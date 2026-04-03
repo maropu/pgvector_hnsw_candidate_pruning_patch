@@ -4,7 +4,7 @@ on:
   push:
     paths:
       - '.github/workflows/DockerBuildTest.yml'
-      - 'Dockerfile'
+      - 'dockerfiles/build/Dockerfile'
       - '*.patch'
 
 env:
@@ -52,6 +52,7 @@ jobs:
             --build-arg PATCH_FILE="${{ matrix.patch_file }}" \
             --tag "${IMAGE_TAG}" \
             --load \
+            -f dockerfiles/build/Dockerfile \
             .
           echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
 
@@ -96,6 +97,7 @@ jobs:
                --target out \
                --output type=local,dest=./dist \
                --progress=plain \
+               -f dockerfiles/build/Dockerfile \
                .; then
             :
           else
