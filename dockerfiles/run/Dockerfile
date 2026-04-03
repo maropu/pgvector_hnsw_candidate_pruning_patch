@@ -318,9 +318,51 @@ LABEL org.opencontainers.image.title="pgvector (patched) + SIFT1M" \
 # Expose default PostgreSQL port
 EXPOSE 5432
 
-# Override the base image ENTRYPOINT to put tini in front of docker-entrypoint.sh.
-# tini becomes PID 1 and forwards signals; postgres runs as a child process,
-# so `pg_ctl restart` (or `docker exec ... pg_ctl restart`) can restart the
-# PostgreSQL server without terminating the container.
-ENTRYPOINT ["tini", "--", "docker-entrypoint.sh"]
+# Use a wrapper script so that tini's direct child is a long-lived shell, not
+# postgres itself.  When docker-entrypoint.sh runs it eventually does
+# `exec postgres`, which would make postgres PID 2 (tini's direct child).
+# With that layout, `pg_ctl restart` kills postgres → tini sees its child exit
+# → container terminates.
+#
+# The wrapper keeps tini's child alive across pg_ctl restarts:
+#   1. docker-entrypoint.sh postgres  starts (and initialises) postgres
+#   2. Once init is done postgres is running in the foreground inside the wrapper
+#   3. pg_ctl restart can now stop/start postgres without the wrapper exiting
+#
+# Signal handling: tini forwards SIGTERM to the wrapper, which propagates it to
+# the postgres process group, so `docker stop` still shuts everything down
+# cleanly.
+COPY --chmod=755 <<'EOF' /usr/local/bin/pg-entrypoint.sh
+#!/bin/bash
+# Wrapper that keeps this shell (tini's direct child) alive across pg_ctl
+# restarts.  Without this wrapper, docker-entrypoint.sh eventually does
+# `exec postgres`, making postgres tini's direct child.  pg_ctl restart then
+# kills postgres → tini sees its child exit → container terminates.
+#
+# Solution: run docker-entrypoint.sh in the background so THIS shell is
+# always tini's direct child.  After postgres exits during a restart, we fall
+# through to an interruptible sleep loop that keeps the container alive until
+# `docker stop` sends SIGTERM.
+
+_stop() {
+    /usr/lib/postgresql/17/bin/pg_ctl stop \
+        -D /var/lib/postgresql/data -m fast 2>/dev/null || true
+    exit 0
+}
+trap '_stop' TERM INT
+
+# Start postgres (including initdb on first run) in the background.
+docker-entrypoint.sh "$@" &
+wait $! || true
+
+# postgres exited (e.g. during pg_ctl restart).  Stay alive so the restarted
+# postgres can continue running.  The sleep loop is signal-interruptible so
+# `docker stop` → SIGTERM → _stop() still shuts everything down cleanly.
+while true; do
+    sleep 60 &
+    wait $!
+done
+EOF
+
+ENTRYPOINT ["tini", "--", "pg-entrypoint.sh"]
 CMD ["postgres"]

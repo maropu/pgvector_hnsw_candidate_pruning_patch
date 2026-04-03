@@ -97,7 +97,7 @@ SCRIPT=/usr/local/lib/import_sift1m_to_postgres.py
 # Respect docker-entrypoint.sh environment
 : "${POSTGRES_DB:=${POSTGRES_USER:-postgres}}"
 : "${SIFT_DATASET:=sift1m}"
-: "${SIFT_SUBSETS:=base query}"
+: "${SIFT_SUBSETS-base query}"
 : "${SIFT_TABLE:=sift1m}"
 : "${SIFT_COLUMN:=embedding}"
 : "${SIFT_CACHE_DIR:=/sift_cache}"

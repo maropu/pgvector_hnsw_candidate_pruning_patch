@@ -1,2 +1,3 @@
-# ann-benchmarks clone (not tracked; install manually)
+.claude
 scripts/.ann-benchmarks/
+.pgvector_dev*
