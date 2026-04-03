@@ -110,6 +110,9 @@ def gen_rotation_matrix(quant_dim: int, max_dim: int, seed: int) -> np.ndarray:
     The full matrix is (max_dim x max_dim); we only retain the first
     quant_dim rows so the output shape is (quant_dim, max_dim).
 
+    quant_dim = HNSW_TQ_NUM_PARTITIONS * HNSW_TQ_PARTITION_DIM = 128 by
+    default, covering all dimensions of SIFT1M (d=128) with full fidelity.
+
     Uses the legacy numpy.random API (np.random.seed + np.random.randn) so
     that the output is bit-for-bit identical to the shipped hnswtq.c.
     """
@@ -186,7 +189,7 @@ def emit_c_file(out_path: str, Q: np.ndarray, quant_dim: int, max_dim: int,
         f.write(f" *   max |QQ^T - I| = {err:.2e}\n")
         f.write(" */\n")
         f.write(f"const float hnsw_tq_rotation"
-                f"[HNSW_TQ_QUANT_DIM_MAX][HNSW_MAX_DIM] = {{\n")
+                f"[HNSW_TQ_ROTATION_ROWS][HNSW_MAX_DIM] = {{\n")
 
         for i in range(quant_dim):
             row = Q[i]
@@ -219,8 +222,8 @@ def main():
         description="Generate pgvector/src/hnswtq.c with TurboQuant rotation matrix."
     )
     ap.add_argument(
-        "--quant-dim", type=int, default=48,
-        help="number of rotation rows to keep (default: 48, fits 96 bits at b=2)"
+        "--quant-dim", type=int, default=128,
+        help="number of rotation rows to keep (default: 128 = HNSW_TQ_NUM_PARTITIONS * HNSW_TQ_PARTITION_DIM)"
     )
     ap.add_argument(
         "--max-dim", type=int, default=2000,
