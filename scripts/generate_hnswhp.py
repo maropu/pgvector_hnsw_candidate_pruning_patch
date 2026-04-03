@@ -17,7 +17,7 @@ Design notes:
     matters for SimHash, so normalization is optional but harmless.
 
 Usage:
-  python gen_hnswhp.py \
+  python scripts/gen_hnswhp.py \
       --bits 64 \
       --dim 2000 \
       --seed 42 \
@@ -97,4 +97,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
