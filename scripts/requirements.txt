@@ -5,3 +5,13 @@ psycopg-binary==3.2.9
 matplotlib==3.10.1
 scikit-learn==1.6.1
 pillow==11.3.0
+# --- ann-benchmarks / pgvector benchmark dependencies ---
+ansicolors==1.1.8
+docker==7.1.0
+h5py==3.16.0
+pyyaml==6.0.2
+psutil==7.0.0
+jinja2==3.1.6
+datasets==3.4.0
+requests==2.32.3
+pgvector==0.4.2
