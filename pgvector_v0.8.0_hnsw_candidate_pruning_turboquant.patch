@@ -1,21 +1,21 @@
  Makefile                                 |     2 +-
  Makefile.win                             |     2 +-
- src/hnsw.c                               |    13 +
- src/hnsw.h                               |    59 +-
- src/hnswbuild.c                          |    18 +-
- src/hnswinsert.c                         |    55 +-
- src/hnswmeta.c                           |   607 +
- src/hnswmeta.h                           |    42 +
- src/hnswscan.c                           |     7 +-
+ src/hnsw.c                               |    15 +-
+ src/hnsw.h                               |    77 +-
+ src/hnswbuild.c                          |    38 +-
+ src/hnswinsert.c                         |    67 +-
+ src/hnswmeta.c                           |   542 +
+ src/hnswmeta.h                           |    43 +
+ src/hnswscan.c                           |    20 +-
  src/hnswtq.c                             | 25759 +++++++++++++++++++++++++++++
- src/hnswtq.h                             |    76 +
- src/hnswutils.c                          |   357 +-
- src/hnswvacuum.c                         |    26 +-
- test/t/017_hnsw_filtering.pl             |     4 +-
+ src/hnswtq.h                             |    53 +
+ src/hnswutils.c                          |   391 +-
+ src/hnswvacuum.c                         |    37 +-
+ test/t/017_hnsw_filtering.pl             |     6 +-
  test/t/039_hnsw_cost.pl                  |     6 +-
  test/t/043_hnsw_iterative_scan.pl        |     2 +
  test/t/044_hnsw_iterative_scan_recall.pl |     3 +-
- 17 files changed, 26939 insertions(+), 99 deletions(-)
+ 17 files changed, 26949 insertions(+), 114 deletions(-)
 
 diff --git a/Makefile b/Makefile
 index 7a4b88c..6df6e63 100644
@@ -44,7 +44,7 @@ index 8c62f9d..6d11761 100644
  
  REGRESS = bit btree cast copy halfvec hnsw_bit hnsw_halfvec hnsw_sparsevec hnsw_vector ivfflat_bit ivfflat_halfvec ivfflat_vector sparsevec vector_type
 diff --git a/src/hnsw.c b/src/hnsw.c
-index 5bfc619..f1293c6 100644
+index 5bfc619..b541daf 100644
 --- a/src/hnsw.c
 +++ b/src/hnsw.c
 @@ -30,6 +30,8 @@ int			hnsw_iterative_scan;
@@ -80,6 +80,15 @@ index 5bfc619..f1293c6 100644
  	MarkGUCPrefixReserved("hnsw");
  }
  
+@@ -149,7 +161,7 @@ hnswcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
+ 	genericcostestimate(root, path, loop_count, &costs);
+ 
+ 	index = index_open(path->indexinfo->indexoid, NoLock);
+-	HnswGetMetaPageInfo(index, &m, NULL);
++	HnswGetMetaPageInfo(index, &m, NULL, NULL);
+ 	index_close(index, NoLock);
+ 
+ 	/*
 @@ -226,6 +238,7 @@ hnswoptions(Datum reloptions, bool validate)
  	static const relopt_parse_elt tab[] = {
  		{"m", RELOPT_TYPE_INT, offsetof(HnswOptions, m)},
@@ -89,10 +98,19 @@ index 5bfc619..f1293c6 100644
  
  	return (bytea *) build_reloptions(reloptions, validate,
 diff --git a/src/hnsw.h b/src/hnsw.h
-index 1fb0c24..7e12e3f 100644
+index 1fb0c24..6e5c68c 100644
 --- a/src/hnsw.h
 +++ b/src/hnsw.h
-@@ -37,16 +37,22 @@
+@@ -20,7 +20,7 @@
+ #define HNSW_NORM_PROC 2
+ #define HNSW_TYPE_INFO_PROC 3
+ 
+-#define HNSW_VERSION	1
++#define HNSW_VERSION	2
+ #define HNSW_MAGIC_NUMBER 0xA953A953
+ #define HNSW_PAGE_ID	0xFF90
+ 
+@@ -37,16 +37,27 @@
  #define HNSW_MIN_M	2
  #define HNSW_MAX_M		100
  #define HNSW_DEFAULT_EF_CONSTRUCTION	64
@@ -109,13 +127,18 @@ index 1fb0c24..7e12e3f 100644
  #define HNSW_ELEMENT_TUPLE_TYPE  1
  #define HNSW_NEIGHBOR_TUPLE_TYPE 2
  
-+/* Neighbor metadata */
-+#define HNSW_NEIGHBOR_METADATA_MAX_BYTES	16
++/*
++ * Maximum bytes for neighbor metadata per entry (in-memory buffer).
++ * Must be >= any possible on-disk neighborMetadataBytes value.
++ * 1-bit per rotated coordinate: sizeof(float32) + ceil(HNSW_MAX_DIM / 8)
++ * For HNSW_MAX_DIM=2000: 4 + 250 = 254.
++ */
++#define HNSW_NEIGHBOR_METADATA_MAX_BYTES	254
 +
  /* Make graph robust against non-HOT updates */
  #define HNSW_HEAPTIDS 10
  
-@@ -60,8 +66,11 @@
+@@ -60,8 +71,11 @@
  #define HNSW_MAX_SIZE (BLCKSZ - MAXALIGN(SizeOfPageHeaderData) - MAXALIGN(sizeof(HnswPageOpaqueData)) - sizeof(ItemIdData))
  #define HNSW_TUPLE_ALLOC_SIZE BLCKSZ
  
@@ -128,7 +151,7 @@ index 1fb0c24..7e12e3f 100644
  
  #define HNSW_NEIGHBOR_ARRAY_SIZE(lm)	(offsetof(HnswNeighborArray, items) + sizeof(HnswCandidate) * (lm))
  
-@@ -86,7 +95,7 @@
+@@ -86,7 +100,7 @@
  #define HnswGetMl(m) (1 / log(m))
  
  /* Ensure fits on page and in uint8 */
@@ -137,7 +160,7 @@ index 1fb0c24..7e12e3f 100644
  
  #define HnswGetSearchCandidate(membername, ptr) pairingheap_container(HnswSearchCandidate, membername, ptr)
  #define HnswGetSearchCandidateConst(membername, ptr) pairingheap_const_container(HnswSearchCandidate, membername, ptr)
-@@ -107,12 +116,19 @@
+@@ -107,12 +121,19 @@
  #define HnswPtrPointer(hp) (hp).ptr
  #define HnswPtrOffset(hp) relptr_offset((hp).relptr)
  
@@ -157,7 +180,7 @@ index 1fb0c24..7e12e3f 100644
  
  typedef enum HnswIterativeScanMode
  {
-@@ -173,6 +189,7 @@ typedef struct HnswSearchCandidate
+@@ -173,6 +194,7 @@ typedef struct HnswSearchCandidate
  {
  	pairingheap_node c_node;
  	pairingheap_node w_node;
@@ -165,7 +188,7 @@ index 1fb0c24..7e12e3f 100644
  	HnswElementPtr element;
  	double		distance;
  }			HnswSearchCandidate;
-@@ -180,9 +197,10 @@ typedef struct HnswSearchCandidate
+@@ -180,9 +202,10 @@ typedef struct HnswSearchCandidate
  /* HNSW index options */
  typedef struct HnswOptions
  {
@@ -179,7 +202,7 @@ index 1fb0c24..7e12e3f 100644
  }			HnswOptions;
  
  typedef struct HnswGraph
-@@ -244,11 +262,24 @@ typedef struct HnswAllocator
+@@ -244,11 +267,24 @@ typedef struct HnswAllocator
  	void	   *state;
  }			HnswAllocator;
  
@@ -204,7 +227,14 @@ index 1fb0c24..7e12e3f 100644
  }			HnswTypeInfo;
  
  typedef struct HnswSupport
-@@ -276,6 +307,7 @@ typedef struct HnswBuildState
+@@ -270,12 +306,14 @@ typedef struct HnswBuildState
+ 	Relation	index;
+ 	IndexInfo  *indexInfo;
+ 	ForkNumber	forkNum;
++	HnswTypeInfo typeInfoBuf;		/* dimension-specific copy of typeInfo */
+ 	const		HnswTypeInfo *typeInfo;
+ 
+ 	/* Settings */
  	int			dimensions;
  	int			m;
  	int			efConstruction;
@@ -212,7 +242,16 @@ index 1fb0c24..7e12e3f 100644
  
  	/* Statistics */
  	double		indtuples;
-@@ -344,7 +376,7 @@ typedef struct HnswNeighborTupleData
+@@ -312,6 +350,8 @@ typedef struct HnswMetaPageData
+ 	OffsetNumber entryOffno;
+ 	int16		entryLevel;
+ 	BlockNumber insertPage;
++	uint16		neighborMetadataBytes;	/* bytes per neighbor entry on disk */
++	uint16		_pad;					/* alignment padding */
+ }			HnswMetaPageData;
+ 
+ typedef HnswMetaPageData * HnswMetaPage;
+@@ -344,7 +384,7 @@ typedef struct HnswNeighborTupleData
  	uint8		type;
  	uint8		version;
  	uint16		count;
@@ -221,7 +260,7 @@ index 1fb0c24..7e12e3f 100644
  }			HnswNeighborTupleData;
  
  typedef HnswNeighborTupleData * HnswNeighborTuple;
-@@ -359,7 +391,7 @@ typedef union
+@@ -359,11 +399,12 @@ typedef union
  typedef union
  {
  	HnswElement element;
@@ -230,7 +269,23 @@ index 1fb0c24..7e12e3f 100644
  }			HnswUnvisited;
  
  typedef struct HnswScanOpaqueData
-@@ -410,6 +442,7 @@ typedef struct HnswVacuumState
+ {
++	HnswTypeInfo typeInfoBuf;		/* dimension-specific copy of typeInfo */
+ 	const		HnswTypeInfo *typeInfo;
+ 	bool		first;
+ 	List	   *w;
+@@ -394,6 +435,10 @@ typedef struct HnswVacuumState
+ 	int			m;
+ 	int			efConstruction;
+ 
++	/* Type info (dimension-specific neighborMetadataBytes loaded from MetaPage) */
++	HnswTypeInfo typeInfoBuf;
++	const HnswTypeInfo *typeInfo;
++
+ 	/* Support functions */
+ 	HnswSupport support;
+ 
+@@ -410,6 +455,7 @@ typedef struct HnswVacuumState
  /* Methods */
  int			HnswGetM(Relation index);
  int			HnswGetEfConstruction(Relation index);
@@ -238,14 +293,16 @@ index 1fb0c24..7e12e3f 100644
  FmgrInfo   *HnswOptionalProcInfo(Relation index, uint16 procnum);
  void		HnswInitSupport(HnswSupport * support, Relation index);
  Datum		HnswNormValue(const HnswTypeInfo * typeInfo, Oid collation, Datum value);
-@@ -417,27 +450,27 @@ bool		HnswCheckNorm(HnswSupport * support, Datum value);
+@@ -417,27 +463,28 @@ bool		HnswCheckNorm(HnswSupport * support, Datum value);
  Buffer		HnswNewBuffer(Relation index, ForkNumber forkNum);
  void		HnswInitPage(Buffer buf, Page page);
  void		HnswInit(void);
 -List	   *HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation index, HnswSupport * support, int m, bool inserting, HnswElement skipElement, visited_hash * v, pairingheap **discarded, bool initVisited, int64 *tuples);
 +List	   *HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation index, const HnswTypeInfo * typeInfo, HnswSupport * support, int m, bool inserting, HnswElement skipElement, visited_hash * v, pairingheap **discarded, bool initVisited, int64 *tuples, bool estimateDistances);
  HnswElement HnswGetEntryPoint(Relation index);
- void		HnswGetMetaPageInfo(Relation index, int *m, HnswElement * entryPoint);
+-void		HnswGetMetaPageInfo(Relation index, int *m, HnswElement * entryPoint);
++void		HnswGetMetaPageInfo(Relation index, int *m, HnswElement * entryPoint, int *neighborMetadataBytes);
++int			HnswComputeNeighborMetadataBytes(int dim);
  void	   *HnswAlloc(HnswAllocator * allocator, Size size);
  HnswElement HnswInitElement(char *base, ItemPointer tid, int m, double ml, int maxLevel, HnswAllocator * alloc);
  HnswElement HnswInitElementFromBlock(BlockNumber blkno, OffsetNumber offno);
@@ -273,10 +330,19 @@ index 1fb0c24..7e12e3f 100644
  const		HnswTypeInfo *HnswGetTypeInfo(Relation index);
  PGDLLEXPORT void HnswParallelBuildMain(dsm_segment *seg, shm_toc *toc);
 diff --git a/src/hnswbuild.c b/src/hnswbuild.c
-index b667478..dd68933 100644
+index b667478..4b6a8e0 100644
 --- a/src/hnswbuild.c
 +++ b/src/hnswbuild.c
-@@ -139,6 +139,8 @@ CreateGraphPages(HnswBuildState * buildstate)
+@@ -96,6 +96,8 @@ CreateMetaPage(HnswBuildState * buildstate)
+ 	metap->entryOffno = InvalidOffsetNumber;
+ 	metap->entryLevel = -1;
+ 	metap->insertPage = InvalidBlockNumber;
++	metap->neighborMetadataBytes = (uint16) buildstate->typeInfo->neighborMetadataBytes;
++	metap->_pad = 0;
+ 	((PageHeader) page)->pd_lower =
+ 		((char *) metap + sizeof(HnswMetaPageData)) - (char *) page;
+ 
+@@ -139,6 +141,8 @@ CreateGraphPages(HnswBuildState * buildstate)
  {
  	Relation	index = buildstate->index;
  	ForkNumber	forkNum = buildstate->forkNum;
@@ -285,7 +351,7 @@ index b667478..dd68933 100644
  	Size		maxSize;
  	HnswElementTuple etup;
  	HnswNeighborTuple ntup;
-@@ -177,7 +179,7 @@ CreateGraphPages(HnswBuildState * buildstate)
+@@ -177,7 +181,7 @@ CreateGraphPages(HnswBuildState * buildstate)
  
  		/* Calculate sizes */
  		etupSize = HNSW_ELEMENT_TUPLE_SIZE(VARSIZE_ANY(valuePtr));
@@ -294,7 +360,7 @@ index b667478..dd68933 100644
  		combinedSize = etupSize + ntupSize + sizeof(ItemIdData);
  
  		/* Initial size check */
-@@ -242,6 +244,8 @@ WriteNeighborTuples(HnswBuildState * buildstate)
+@@ -242,6 +246,8 @@ WriteNeighborTuples(HnswBuildState * buildstate)
  {
  	Relation	index = buildstate->index;
  	ForkNumber	forkNum = buildstate->forkNum;
@@ -303,7 +369,7 @@ index b667478..dd68933 100644
  	int			m = buildstate->m;
  	HnswElementPtr iter = buildstate->graph->head;
  	char	   *base = buildstate->hnswarea;
-@@ -255,7 +259,7 @@ WriteNeighborTuples(HnswBuildState * buildstate)
+@@ -255,7 +261,7 @@ WriteNeighborTuples(HnswBuildState * buildstate)
  		HnswElement element = HnswPtrAccess(base, iter);
  		Buffer		buf;
  		Page		page;
@@ -312,7 +378,7 @@ index b667478..dd68933 100644
  
  		/* Update iterator */
  		iter = element->next;
-@@ -271,7 +275,7 @@ WriteNeighborTuples(HnswBuildState * buildstate)
+@@ -271,7 +277,7 @@ WriteNeighborTuples(HnswBuildState * buildstate)
  		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
  		page = BufferGetPage(buf);
  
@@ -321,7 +387,7 @@ index b667478..dd68933 100644
  
  		if (!PageIndexTupleOverwrite(page, element->neighborOffno, (Item) ntup, ntupSize))
  			elog(ERROR, "failed to add index item to \"%s\"", RelationGetRelationName(index));
-@@ -425,6 +429,7 @@ static void
+@@ -425,6 +431,7 @@ static void
  InsertTupleInMemory(HnswBuildState * buildstate, HnswElement element)
  {
  	HnswGraph  *graph = buildstate->graph;
@@ -329,7 +395,7 @@ index b667478..dd68933 100644
  	HnswSupport *support = &buildstate->support;
  	HnswElement entryPoint;
  	LWLock	   *entryLock = &graph->entryLock;
-@@ -457,7 +462,7 @@ InsertTupleInMemory(HnswBuildState * buildstate, HnswElement element)
+@@ -457,7 +464,7 @@ InsertTupleInMemory(HnswBuildState * buildstate, HnswElement element)
  	}
  
  	/* Find neighbors for element */
@@ -338,7 +404,7 @@ index b667478..dd68933 100644
  
  	/* Update graph in memory */
  	UpdateGraphInMemory(support, element, m, efConstruction, entryPoint, buildstate);
-@@ -497,7 +502,7 @@ InsertTuple(Relation index, Datum *values, bool *isnull, ItemPointer heaptid, Hn
+@@ -497,7 +504,7 @@ InsertTuple(Relation index, Datum *values, bool *isnull, ItemPointer heaptid, Hn
  	{
  		LWLockRelease(flushLock);
  
@@ -347,7 +413,7 @@ index b667478..dd68933 100644
  	}
  
  	/*
-@@ -529,7 +534,7 @@ InsertTuple(Relation index, Datum *values, bool *isnull, ItemPointer heaptid, Hn
+@@ -529,7 +536,7 @@ InsertTuple(Relation index, Datum *values, bool *isnull, ItemPointer heaptid, Hn
  
  		LWLockRelease(flushLock);
  
@@ -356,16 +422,41 @@ index b667478..dd68933 100644
  	}
  
  	/* Ok, we can proceed to allocate the element */
-@@ -664,6 +669,7 @@ InitBuildState(HnswBuildState * buildstate, Relation heap, Relation index, Index
- 
- 	buildstate->m = HnswGetM(index);
- 	buildstate->efConstruction = HnswGetEfConstruction(index);
-+	buildstate->neighborMetadata = HnswSupportNeighborMetadata(index);
+@@ -660,10 +667,6 @@ InitBuildState(HnswBuildState * buildstate, Relation heap, Relation index, Index
+ 	buildstate->index = index;
+ 	buildstate->indexInfo = indexInfo;
+ 	buildstate->forkNum = forkNum;
+-	buildstate->typeInfo = HnswGetTypeInfo(index);
+-
+-	buildstate->m = HnswGetM(index);
+-	buildstate->efConstruction = HnswGetEfConstruction(index);
  	buildstate->dimensions = TupleDescAttr(index->rd_att, 0)->atttypmod;
  
  	/* Disallow varbit since require fixed dimensions */
+@@ -678,6 +681,21 @@ InitBuildState(HnswBuildState * buildstate, Relation heap, Relation index, Index
+ 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+ 				 errmsg("column does not have dimensions")));
+ 
++	/*
++	 * Copy the base typeInfo into our per-build buffer.  For distance types
++	 * that support neighbor metadata (neighborMetadataBytes > 0 in static
++	 * typeInfo), override with the dimension-specific byte count.
++	 */
++	memcpy(&buildstate->typeInfoBuf, HnswGetTypeInfo(index), sizeof(HnswTypeInfo));
++	if (buildstate->typeInfoBuf.neighborMetadataBytes > 0)
++		buildstate->typeInfoBuf.neighborMetadataBytes =
++			HnswComputeNeighborMetadataBytes(buildstate->dimensions);
++	buildstate->typeInfo = &buildstate->typeInfoBuf;
++
++	buildstate->m = HnswGetM(index);
++	buildstate->efConstruction = HnswGetEfConstruction(index);
++	buildstate->neighborMetadata = HnswSupportNeighborMetadata(index);
++
+ 	if (buildstate->dimensions > buildstate->typeInfo->maxDimensions)
+ 		ereport(ERROR,
+ 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 diff --git a/src/hnswinsert.c b/src/hnswinsert.c
-index a5fac4e..7610f26 100644
+index a5fac4e..9da1a9b 100644
 --- a/src/hnswinsert.c
 +++ b/src/hnswinsert.c
 @@ -136,7 +136,7 @@ HnswInsertAppendPage(Relation index, Buffer *nbuf, Page *npage, GenericXLogState
@@ -558,6 +649,15 @@ index a5fac4e..7610f26 100644
  	LOCKMODE	lockmode = ShareLock;
  	char	   *base = NULL;
  
+@@ -704,7 +707,7 @@ HnswInsertTupleOnDisk(Relation index, HnswSupport * support, Datum value, ItemPo
+ 	LockPage(index, HNSW_UPDATE_LOCK, lockmode);
+ 
+ 	/* Get m and entry point */
+-	HnswGetMetaPageInfo(index, &m, &entryPoint);
++	HnswGetMetaPageInfo(index, &m, &entryPoint, NULL);
+ 
+ 	/* Create an element */
+ 	element = HnswInitElement(base, heaptid, m, HnswGetMl(m), HnswGetMaxLevel(m), NULL);
 @@ -725,10 +728,10 @@ HnswInsertTupleOnDisk(Relation index, HnswSupport * support, Datum value, ItemPo
  	}
  
@@ -571,7 +671,25 @@ index a5fac4e..7610f26 100644
  
  	/* Release lock */
  	UnlockPage(index, HNSW_UPDATE_LOCK, lockmode);
-@@ -752,7 +755,7 @@ HnswInsertTuple(Relation index, Datum *values, bool *isnull, ItemPointer heaptid
+@@ -743,8 +746,16 @@ static void
+ HnswInsertTuple(Relation index, Datum *values, bool *isnull, ItemPointer heaptid)
+ {
+ 	Datum		value;
+-	const		HnswTypeInfo *typeInfo = HnswGetTypeInfo(index);
++	HnswTypeInfo typeInfoBuf;
++	const		HnswTypeInfo *typeInfo;
+ 	HnswSupport support;
++	int			neighborMetadataBytes;
++
++	/* Copy base typeInfo and override neighborMetadataBytes from MetaPage */
++	memcpy(&typeInfoBuf, HnswGetTypeInfo(index), sizeof(HnswTypeInfo));
++	HnswGetMetaPageInfo(index, NULL, NULL, &neighborMetadataBytes);
++	typeInfoBuf.neighborMetadataBytes = neighborMetadataBytes;
++	typeInfo = &typeInfoBuf;
+ 
+ 	HnswInitSupport(&support, index);
+ 
+@@ -752,7 +763,7 @@ HnswInsertTuple(Relation index, Datum *values, bool *isnull, ItemPointer heaptid
  	if (!HnswFormIndexValue(&value, values, isnull, typeInfo, &support))
  		return;
  
@@ -582,63 +700,67 @@ index a5fac4e..7610f26 100644
  /*
 diff --git a/src/hnswmeta.c b/src/hnswmeta.c
 new file mode 100644
-index 0000000..6c97cd7
+index 0000000..c8631be
 --- /dev/null
 +++ b/src/hnswmeta.c
-@@ -0,0 +1,607 @@
+@@ -0,0 +1,542 @@
 +/*
 + * hnswmeta.c
 + *
 + * TurboQuant-based neighbor metadata for HNSW candidate pruning.
 + *
-+ * Algorithm: sub-vector random projection using i.i.d. concentration
-+ * (see arXiv:2504.19874 and scripts/generate_hnswtq.py).
-+ *
 + * -------------------------------------------------------------------------
 + * Key mathematical insight
 + * -------------------------------------------------------------------------
-+ * After applying the random rotation R, the rotated edge vector
-+ * y = R · delta has coordinates that are approximately i.i.d. N(0, σ²)
-+ * where σ² = ||delta||² / dim (concentration of measure in high dimensions).
++ * After applying the precomputed random rotation R, the rotated edge vector
++ * y = R · delta has coordinates y_j that are approximately i.i.d.
++ * N(0, ||delta||² / dim) (concentration of measure in high dimensions).
 + *
-+ * Splitting y into M sub-vectors s_i of K elements each, the i.i.d.
-+ * structure yields the conditional expectation identity:
++ * We normalize each coordinate: ỹ_j = y_j · sqrt(dim) / ||delta|| ~ N(0, 1),
++ * then quantize ỹ_j to 2 bits using thresholds {-1, 0, +1}:
 + *
-+ *   E[<w_i, s_i> | p_i] = p_i · <w_i, r_i>
++ *   code 0 (ỹ_j < -1)    → q̃_j = E[Z | Z < -1]    ≈ -1.5252
++ *   code 1 (-1 ≤ ỹ_j < 0) → q̃_j = E[Z | -1 ≤ Z < 0] ≈ -0.4599
++ *   code 2 ( 0 ≤ ỹ_j < 1) → q̃_j = E[Z |  0 ≤ Z < 1] ≈ +0.4599
++ *   code 3 (ỹ_j ≥ 1)     → q̃_j = E[Z | Z ≥ 1]     ≈ +1.5252
 + *
-+ * where r_i = [1/√K, ..., 1/√K] and p_i = <s_i, r_i> = mean(s_i) · √K.
++ * At query time the inner product <v, delta> is estimated by Price's theorem:
 + *
-+ * This means a single stored scalar p_i (the sub-vector mean, normalised to
-+ * N(0,1)) provides an unbiased estimate of any inner product <w_i, s_i>
-+ * once the query sub-vector w_i is known.  Summing over all M partitions
-+ * yields an unbiased estimate of <v, delta> that uses ALL dim input
-+ * dimensions — unlike the previous approach which projected only onto 48
-+ * rows and discarded the remaining dim-48 dimensions.
++ *   E[w_j · q̃(ỹ_j)] = C₂ · Cov(w_j, ỹ_j) = C₂ · <v, delta> / (||delta|| · sqrt(dim))
++ *
++ * where w_j = (R·v)_j and C₂ = E[Z·q̃(Z)] ≈ 0.8828 for our 4-level quantizer.
++ *
++ * The unbiased estimator is therefore:
++ *
++ *   <v, delta>_est = ||delta|| · sqrt(dim) / (n_rot · C₂) · Σ_j w_j · q̃_j
++ *
++ * Using 2 bits instead of 1 increases the effective signal strength by
++ * C₂/C₁ = 0.8828 / sqrt(2/π) ≈ 1.107 (≈ 10.7% stronger, lower MSE).
 + *
 + * -------------------------------------------------------------------------
 + * setNeighborMetadata (index build / insert):
 + * -------------------------------------------------------------------------
-+ *   1. Compute edge vector delta = neighbor - current.
-+ *   2. Rotate: y = R · delta using n_rot = min(dim, HNSW_TQ_ROTATION_ROWS)
-+ *      rows of the precomputed rotation matrix.
-+ *   3. Partition y into M = HNSW_TQ_NUM_PARTITIONS sub-vectors of K elements.
-+ *   4. For each partition i compute the normalised scalar:
-+ *        p̃_i = mean(y[i*K:(i+1)*K]) · sqrt(dim) / ||delta||  ≈ N(0,1)
-+ *   5. Quantise p̃_i with a 12-bit uniform quantiser (range ±4).
-+ *   6. Store: [float32 ||delta||²] + [12 bytes: 8 × 12-bit packed scalars].
++ *   1. Compute edge vector delta = neighbor - current; cn_norm = ||delta||.
++ *   2. Compute n_rot = Min(dim, HNSW_TQ_ROTATION_ROWS).
++ *   3. If n_rot < HNSW_TQ_L2_MIN_ROT: store only float32 norm (4 bytes).
++ *   4. Rotate: y = R · delta  (first n_rot rows of rotation matrix).
++ *   5. Normalize: ỹ_j = y_j · sqrt(dim) / cn_norm.
++ *   6. Store float32 ||delta||² at bytes [0-3].
++ *   7. Store 2-bit codes at bytes [4 .. 4+ceil(2·n_rot/8)-1]:
++ *        bits [2j, 2j+1] = quantized code for ỹ_j.
 + *
 + * -------------------------------------------------------------------------
 + * estimateDistances (index scan):
 + * -------------------------------------------------------------------------
 + *   1. Compute query direction v = query - current.
-+ *   2. Rotate: w = R · v (same n_rot rows).
-+ *   3. For each partition i: sum_w_i = sum(w[i*K:(i+1)*K]).
++ *   2. Rotate: w = R · v  (same n_rot rows).
++ *   3. Precompute scale = sqrt(dim) / (n_rot · C₂).
 + *   4. For each neighbor entry:
-+ *        a. Dequantise stored p̃_i values.
-+ *        b. dot = Σ_i p̃_i · sum_w_i
-+ *        c. <v, delta>_est = ||delta|| · sqrt(dim) / (M · sqrt(K)) · dot
-+ *           [unbiased: E[estimate] = <v, delta>]
-+ *        d. est = ||v||² + ||delta||² - 2 · <v, delta>_est
++ *        a. Read cn_dist = ||delta||² from bytes [0-3]; cn_norm = sqrt(cn_dist).
++ *        b. If n_rot < HNSW_TQ_L2_MIN_ROT: use conservative bound cq_dist + cn_dist.
++ *        c. dot = Σ_j w[j] · dq[code_j]   (dq = {-1.5252,-0.4599,+0.4599,+1.5252})
++ *        d. <v, delta>_est = cn_norm · scale · dot
++ *        e. est = ||v||² + ||delta||² - 2 · <v, delta>_est
 + */
 +
 +#include "postgres.h"
@@ -777,70 +899,6 @@ index 0000000..6c97cd7
 +}
 +
 +/* -------------------------------------------------------------------------
-+ * 12-bit uniform quantiser  (L2, range ±HNSW_TQ_L2_QUANT_CLIP)
-+ * -------------------------------------------------------------------------
-+ *
-+ * Maps a scalar v ≈ N(0,1) to a 12-bit index in [0, HNSW_TQ_L2_QUANT_LEVELS).
-+ * Uniform grid over [-CLIP, CLIP]; values outside are clamped.
-+ */
-+static inline uint16
-+QuantScalar12bit(float v)
-+{
-+	const float clip  = HNSW_TQ_L2_QUANT_CLIP;
-+	const float scale = (float)(HNSW_TQ_L2_QUANT_LEVELS - 1) / (2.0f * clip);
-+
-+	if (v <= -clip)
-+		return 0;
-+	if (v >= clip)
-+		return (uint16)(HNSW_TQ_L2_QUANT_LEVELS - 1);
-+	return (uint16)((v + clip) * scale + 0.5f);
-+}
-+
-+static inline float
-+DequantScalar12bit(uint16 idx)
-+{
-+	const float clip = HNSW_TQ_L2_QUANT_CLIP;
-+	const float step = 2.0f * clip / (float)(HNSW_TQ_L2_QUANT_LEVELS - 1);
-+
-+	return -clip + (float)idx * step;
-+}
-+
-+/*
-+ * Pack 8 twelve-bit values into 12 bytes.
-+ * Each pair of 12-bit values occupies 3 bytes:
-+ *   byte[3i+0] = v[2i]   >> 4
-+ *   byte[3i+1] = v[2i]   << 4  |  v[2i+1] >> 8
-+ *   byte[3i+2] = v[2i+1] & 0xFF
-+ */
-+static void
-+Pack12bit(const uint16 *vals, char *packed)
-+{
-+	for (int i = 0; i < 4; i++)
-+	{
-+		uint16 v0 = vals[2 * i];
-+		uint16 v1 = vals[2 * i + 1];
-+
-+		packed[3 * i]     = (char)(v0 >> 4);
-+		packed[3 * i + 1] = (char)(((v0 & 0xF) << 4) | (v1 >> 8));
-+		packed[3 * i + 2] = (char)(v1 & 0xFF);
-+	}
-+}
-+
-+static void
-+Unpack12bit(const char *packed, uint16 *vals)
-+{
-+	for (int i = 0; i < 4; i++)
-+	{
-+		uint8 b0 = (uint8) packed[3 * i];
-+		uint8 b1 = (uint8) packed[3 * i + 1];
-+		uint8 b2 = (uint8) packed[3 * i + 2];
-+
-+		vals[2 * i]     = ((uint16) b0 << 4) | (b1 >> 4);
-+		vals[2 * i + 1] = ((uint16)(b1 & 0xF) << 8) | b2;
-+	}
-+}
-+
-+/* -------------------------------------------------------------------------
 + * 8-bit uniform quantiser  (cosine, range ±HNSW_TQ_COSINE_QUANT_CLIP)
 + * -------------------------------------------------------------------------
 + */
@@ -867,17 +925,17 @@ index 0000000..6c97cd7
 +}
 +
 +/* -------------------------------------------------------------------------
-+ * Compute active partition parameters given a vector dimension.
++ * Compute cosine partition parameters given a vector dimension.
 + *
-+ * n_rot    : number of rotation rows to use = min(dim, HNSW_TQ_ROTATION_ROWS),
-+ *            rounded down to the nearest multiple of part_dim.
-+ * m_actual : number of active partitions = n_rot / part_dim.
++ * n_rot : rotation rows rounded down to a multiple of part_dim.
++ * m     : number of active partitions = n_rot / part_dim.
 + * -------------------------------------------------------------------------
 + */
 +static inline void
-+TurboQuantPartitionParams(int dim, int part_dim, int *n_rot_out, int *m_out)
++TurboQuantCosinePartitionParams(int dim, int *n_rot_out, int *m_out)
 +{
 +	int n_rot = (dim < HNSW_TQ_ROTATION_ROWS) ? dim : HNSW_TQ_ROTATION_ROWS;
++	int part_dim = HNSW_TQ_COSINE_PARTITION_DIM;
 +
 +	/* Round down to a multiple of part_dim */
 +	n_rot = (n_rot / part_dim) * part_dim;
@@ -887,79 +945,95 @@ index 0000000..6c97cd7
 +}
 +
 +/* -------------------------------------------------------------------------
-+ * L2 distance metadata
++ * L2 distance metadata  —  2-bit normalized Gaussian quantization
 + * -------------------------------------------------------------------------
 + *
-+ * Layout (16 bytes):
++ * Layout (variable, sizeof(float32) + ceil(2·n_rot/8) bytes):
 + *   [0-3]   float32  ||delta||^2  (delta = neighbor - current)
-+ *   [4-15]  uint8×12 8 × 12-bit partition scalars, packed
++ *   [4..]   ceil(2·n_rot/8) bytes  2-bit codes for rotated coordinates
++ *            bits [2j,2j+1] = code for ỹ_j = y_j·sqrt(dim)/||delta||
++ *            code 0→-1.5252, 1→-0.4599, 2→+0.4599, 3→+1.5252 (thresholds ±1)
++ *
++ * n_rot = Min(dim, HNSW_TQ_ROTATION_ROWS); the total byte count is written
++ * to the MetaPage at build time and passed through typeInfo->neighborMetadataBytes.
++ *
++ * When n_rot < HNSW_TQ_L2_MIN_ROT only the 4-byte float32 norm is stored;
++ * callers then use a conservative upper bound instead of the noisy estimate.
 + */
 +
 +void
 +HnswSetVectorL2NeighborMetadata(char *metadata, Datum current, Datum neighbor)
 +{
-+	Vector *c   = DatumGetVector(current);
-+	Vector *n   = DatumGetVector(neighbor);
-+	int		dim = c->dim;
++	Vector *c       = DatumGetVector(current);
++	Vector *n       = DatumGetVector(neighbor);
++	int		dim     = c->dim;
 +	float	delta[HNSW_MAX_DIM];
 +	float	y[HNSW_TQ_ROTATION_ROWS];
 +	float	cn_dist;
-+	float	norm;
-+	int		n_rot,
-+			k,
-+			m;
-+	uint16	idx[HNSW_TQ_NUM_PARTITIONS];
++	float	cn_norm;
++	int		n_rot   = (dim < HNSW_TQ_ROTATION_ROWS) ? dim : HNSW_TQ_ROTATION_ROWS;
++	int		nbytes  = (2 * n_rot + 7) / 8;
 +
 +	/* Compute edge vector delta = n - c */
 +	for (int i = 0; i < dim; i++)
 +		delta[i] = n->x[i] - c->x[i];
 +
 +	cn_dist = VectorL2SquaredDistance(dim, c->x, n->x);
-+	norm    = sqrtf(cn_dist);
++	cn_norm = sqrtf(cn_dist);
 +
 +	/* Store ||delta||^2 */
 +	memcpy(metadata, &cn_dist, sizeof(float));
 +
-+	TurboQuantPartitionParams(dim, HNSW_TQ_PARTITION_DIM, &n_rot, &m);
-+
-+	if (m == 0 || norm <= 1e-10f)
-+	{
-+		memset(metadata + sizeof(float), 0,
-+			   HNSW_NEIGHBOR_VECTOR_L2_METADATA_BYTES - sizeof(float));
++	/*
++	 * For n_rot < HNSW_TQ_L2_MIN_ROT, store only the norm.
++	 * Estimates are too noisy with fewer than HNSW_TQ_L2_MIN_ROT rotation rows.
++	 */
++	if (n_rot < HNSW_TQ_L2_MIN_ROT || cn_norm <= 1e-10f)
 +		return;
-+	}
 +
-+	/* Rotate delta: y[j] ≈ N(0, ||delta||²/dim)  for j = 0..n_rot-1 */
++	/* Rotate delta: y[j] = (R·delta)[j] for j = 0..n_rot-1 */
 +	TurboQuantProject(dim, delta, n_rot, y);
 +
 +	/*
-+	 * For each partition i: p̃_i = mean(y[i*K:(i+1)*K]) * sqrt(dim) / norm
-+	 *
-+	 * Derivation: mean(y_i) ~ N(0, ||delta||²/dim) after averaging K i.i.d.
-+	 * terms, so dividing by norm/sqrt(dim) gives p̃_i ~ N(0,1).
++	 * Normalize to ~N(0,1): ỹ_j = y_j * sqrt(dim) / cn_norm.
++	 * Quantize with thresholds {-1, 0, +1}: code ∈ {0,1,2,3}.
++	 * Pack 2-bit codes at bits [2j, 2j+1].
 +	 */
-+	k = HNSW_TQ_PARTITION_DIM;
 +	{
-+		float scale_store = sqrtf((float) dim) / (norm * sqrtf((float) k));
++		float norm_scale = sqrtf((float) dim) / cn_norm;
 +
-+		for (int i = 0; i < m; i++)
++		memset(metadata + sizeof(float), 0, nbytes);
++		for (int j = 0; j < n_rot; j++)
 +		{
-+			float s = 0.0f;
++			float	z        = y[j] * norm_scale;
++			int		q;
++			int		byte_idx = j / 4;
++			int		bit_off  = (j % 4) * 2;
 +
-+			for (int j = 0; j < k; j++)
-+				s += y[i * k + j];
++			if (z < -1.0f)
++				q = 0;
++			else if (z < 0.0f)
++				q = 1;
++			else if (z < 1.0f)
++				q = 2;
++			else
++				q = 3;
 +
-+			idx[i] = QuantScalar12bit(s * scale_store);
++			((uint8 *)(metadata + sizeof(float)))[byte_idx] |= (uint8)(q << bit_off);
 +		}
 +	}
-+
-+	/* Pad unused partition slots with the mid-range index (≈ 0) */
-+	for (int i = m; i < HNSW_TQ_NUM_PARTITIONS; i++)
-+		idx[i] = HNSW_TQ_L2_QUANT_LEVELS / 2;
-+
-+	Pack12bit(idx, metadata + sizeof(float));
 +}
 +
++/*
++ * Estimate L2² distances from current to each neighbor using stored 2-bit codes.
++ *
++ * Estimator (asymptotically unbiased via Price's theorem):
++ *   <v, delta>_est = cn_norm · sqrt(dim) / (n_rot · C₂) · Σ_j w[j] · dq[code_j]
++ *
++ * where v = query - current, w = R·v, dq[] = {-1.5252,-0.4599,+0.4599,+1.5252}
++ * are the conditional expectations E[Z|bin] for Z~N(0,1) with thresholds at ±1,
++ * cn_norm = ||delta||, and C₂ = HNSW_TQ_L2_2BIT_C2 ≈ 0.8828.
++ */
 +void
 +HnswEstimateVectorL2Distances(Datum current, Datum query, HnswNeighborEntry entries,
 +							   int *unvisitedIndexes, int count)
@@ -967,14 +1041,20 @@ index 0000000..6c97cd7
 +	Vector *c   = DatumGetVector(current);
 +	Vector *q   = DatumGetVector(query);
 +	int		dim = c->dim;
-+	float	v[HNSW_MAX_DIM];		/* query - current */
++	float	v[HNSW_MAX_DIM];
 +	float	w_rot[HNSW_TQ_ROTATION_ROWS];
 +	float	cq_dist;
-+	int		n_rot,
-+			k,
-+			m;
-+	float	sum_w[HNSW_TQ_NUM_PARTITIONS];
-+	float	scale_query;
++	int		n_rot = (dim < HNSW_TQ_ROTATION_ROWS) ? dim : HNSW_TQ_ROTATION_ROWS;
++	float	scale;  /* sqrt(dim) / (n_rot · C₂), applied per-entry with cn_norm */
++
++	/*
++	 * Dequantization table: E[Z|bin k] for Z~N(0,1) with thresholds at {-1,0,+1}.
++	 *   bin 0: Z < -1   → -φ(1)/Φ(-1)          ≈ -1.5252
++	 *   bin 1: -1≤Z<0   → (φ(-1)-φ(0))/P(bin)  ≈ -0.4599
++	 *   bin 2: 0≤Z<1    → (φ(0)-φ(1))/P(bin)   ≈ +0.4599
++	 *   bin 3: Z ≥ 1    →  φ(1)/Φ(-1)          ≈ +1.5252
++	 */
++	static const float dq[4] = {-1.5252f, -0.4599f, +0.4599f, +1.5252f};
 +
 +	/* v = query - current */
 +	for (int i = 0; i < dim; i++)
@@ -982,44 +1062,19 @@ index 0000000..6c97cd7
 +
 +	cq_dist = VectorL2SquaredDistance(dim, c->x, q->x);
 +
-+	TurboQuantPartitionParams(dim, HNSW_TQ_PARTITION_DIM, &n_rot, &m);
-+
-+	k = HNSW_TQ_PARTITION_DIM;
-+
-+	if (m > 0)
++	if (n_rot >= HNSW_TQ_L2_MIN_ROT)
 +	{
-+		/* Rotate query direction */
 +		TurboQuantProject(dim, v, n_rot, w_rot);
-+
-+		/* Precompute partition sums for the query */
-+		for (int i = 0; i < m; i++)
-+		{
-+			float s = 0.0f;
-+
-+			for (int j = 0; j < k; j++)
-+				s += w_rot[i * k + j];
-+
-+			sum_w[i] = s;
-+		}
-+
-+		/*
-+		 * Unbiased scaling factor for the inner product estimate:
-+		 *
-+		 *   <v, delta> ≈ ||delta|| * sqrt(dim) / (M * sqrt(K)) * Σ_i p̃_i * sum_w_i
-+		 *
-+		 * Here scale_query = sqrt(dim) / (M * sqrt(K)).
-+		 * The cn_norm factor is applied per-entry below.
-+		 */
-+		scale_query = sqrtf((float) dim) / ((float) m * sqrtf((float) k));
++		scale = sqrtf((float) dim) / ((float) n_rot * HNSW_TQ_L2_2BIT_C2);
 +	}
 +
 +	for (int i = 0; i < count; i++)
 +	{
 +		HnswNeighborEntry entry = &entries[unvisitedIndexes[i]];
-+		float	cn_dist;
-+		float	cn_norm;
-+		uint16	idx[HNSW_TQ_NUM_PARTITIONS];
-+		float	dot;
++		float		cn_dist;
++		float		cn_norm;
++		const uint8 *bits;
++		float		dot;
 +
 +		if (!ItemPointerIsValid(&entry->indextid))
 +			break;
@@ -1028,33 +1083,31 @@ index 0000000..6c97cd7
 +		memcpy(&cn_dist, entry->metadata, sizeof(float));
 +		cn_norm = sqrtf(cn_dist);
 +
-+		if (m == 0 || cn_norm <= 1e-10f)
++		if (n_rot < HNSW_TQ_L2_MIN_ROT || cn_norm <= 1e-10f)
 +		{
-+			/* No pruning metadata available; use conservative upper bound */
++			/* Too few rotation rows or degenerate edge; use conservative upper bound */
 +			entry->distance = (double) cq_dist + (double) cn_dist;
 +			continue;
 +		}
 +
-+		Unpack12bit(entry->metadata + sizeof(float), idx);
++		bits = (const uint8 *)(entry->metadata + sizeof(float));
++		dot  = 0.0f;
++		for (int j = 0; j < n_rot; j++)
++		{
++			int byte_idx = j / 4;
++			int bit_off  = (j % 4) * 2;
++			int code     = (bits[byte_idx] >> bit_off) & 0x3;
 +
-+		/*
-+		 * Compute dot = Σ_i p̃_i * sum_w_i.
-+		 *
-+		 * By the conditional expectation identity (exploiting i.i.d.):
-+		 *   E[<w_i, s_i> | p̃_i] = p̃_i * <w_i, r_i>  where r_i = [1/√K,...]
-+		 *   <w_i, r_i> = mean(w_i) * √K = sum_w_i / √K ... but the √K
-+		 * factors cancel inside scale_query, so we work directly with sum_w_i.
-+		 */
-+		dot = 0.0f;
-+		for (int j = 0; j < m; j++)
-+			dot += DequantScalar12bit(idx[j]) * sum_w[j];
++			dot += w_rot[j] * dq[code];
++		}
 +
 +		/*
 +		 * Estimated L2² distance:
-+		 *   est = ||v||² + ||delta||² - 2 * ||delta|| * scale_query * dot
++		 *   est = ||v||² + ||delta||² - 2 · cn_norm · scale · dot
++		 * where scale = sqrt(dim) / (n_rot · C₂).
 +		 */
 +		entry->distance = (double) cq_dist + (double) cn_dist
-+						  - 2.0 * (double) cn_norm * (double) scale_query * (double) dot;
++						  - 2.0 * (double) cn_norm * (double) scale * (double) dot;
 +	}
 +}
 +
@@ -1090,7 +1143,7 @@ index 0000000..6c97cd7
 +		norm2 += delta[i] * delta[i];
 +	norm = sqrtf(norm2);
 +
-+	TurboQuantPartitionParams(dim, HNSW_TQ_COSINE_PARTITION_DIM, &n_rot, &m);
++	TurboQuantCosinePartitionParams(dim, &n_rot, &m);
 +	k = HNSW_TQ_COSINE_PARTITION_DIM;
 +
 +	if (m == 0 || norm <= 1e-10f)
@@ -1115,7 +1168,7 @@ index 0000000..6c97cd7
 +		}
 +	}
 +
-+	for (int i = m; i < HNSW_TQ_NUM_PARTITIONS; i++)
++	for (int i = m; i < HNSW_TQ_COSINE_NUM_PARTITIONS; i++)
 +		metadata[i] = (char)(HNSW_TQ_COSINE_QUANT_LEVELS / 2);
 +}
 +
@@ -1133,7 +1186,7 @@ index 0000000..6c97cd7
 +	int		n_rot,
 +			k,
 +			m;
-+	float	sum_w[HNSW_TQ_NUM_PARTITIONS];
++	float	sum_w[HNSW_TQ_COSINE_NUM_PARTITIONS];
 +	float	scale_query;
 +
 +	for (int i = 0; i < dim; i++)
@@ -1143,7 +1196,7 @@ index 0000000..6c97cd7
 +		v_norm2 += v[i] * v[i];
 +	v_norm = sqrtf(v_norm2);
 +
-+	TurboQuantPartitionParams(dim, HNSW_TQ_COSINE_PARTITION_DIM, &n_rot, &m);
++	TurboQuantCosinePartitionParams(dim, &n_rot, &m);
 +	k = HNSW_TQ_COSINE_PARTITION_DIM;
 +
 +	if (m > 0)
@@ -1195,10 +1248,10 @@ index 0000000..6c97cd7
 +}
 diff --git a/src/hnswmeta.h b/src/hnswmeta.h
 new file mode 100644
-index 0000000..19fab57
+index 0000000..2a6a556
 --- /dev/null
 +++ b/src/hnswmeta.h
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,43 @@
 +#ifndef HNSW_META_H
 +#define HNSW_META_H
 +
@@ -1209,21 +1262,22 @@ index 0000000..19fab57
 +#include "utils/relcache.h"
 +
 +/*
-+ * Neighbor metadata layout (TurboQuant sub-vector projection):
++ * Neighbor metadata layout:
 + *
-+ * L2 (16 bytes):
++ * L2 (variable size, stored in MetaPage as neighborMetadataBytes):
 + *   [0-3]   float32  ||n - c||^2    (L2 squared distance current -> neighbor)
-+ *   [4-15]  uint8×12 8 partition scalars × 12 bits packed (96 bits total)
++ *   [4..]   ceil(2·n_rot/8) bytes   2-bit code per rotated coordinate
++ *            bits [2j,2j+1] = quantized ỹ_j = y_j·sqrt(dim)/||delta||
++ *            where n_rot = Min(dim, HNSW_TQ_ROTATION_ROWS)
++ *            code 0→−1.5252, 1→−0.4599, 2→+0.4599, 3→+1.5252  (thresholds ±1)
++ *   Total: sizeof(float32) + ceil(2·n_rot/8) bytes
++ *   (4 bytes only when n_rot < HNSW_TQ_L2_MIN_ROT; estimates too noisy)
 + *
-+ * Cosine (8 bytes):
-+ *   [0-7]   uint8×8  8 partition scalars × 8 bits (64 bits total)
-+ *
-+ * Each scalar p̃_i encodes the mean of K rotated sub-vector coordinates,
-+ * normalised to ≈ N(0,1) for quantisation:
-+ *   p̃_i = mean(y[i*K : (i+1)*K]) * sqrt(dim) / ||delta||
-+ * where y = R · delta is the rotated edge vector.
++ * Cosine (8 bytes, currently disabled):
++ *   [0-7]   uint8×8  M=8 partition scalars × 8 bits
 + */
-+#define HNSW_NEIGHBOR_VECTOR_L2_METADATA_BYTES		16
++
++/* Fixed cosine metadata size (kept for potential future use) */
 +#define HNSW_NEIGHBOR_VECTOR_COSINE_METADATA_BYTES	8
 +
 +/* Utility macros */
@@ -1242,7 +1296,7 @@ index 0000000..19fab57
 +
 +#endif	/* HNSW_META_H */
 diff --git a/src/hnswscan.c b/src/hnswscan.c
-index 955998a..2f24bdf 100644
+index 955998a..1b0cbbc 100644
 --- a/src/hnswscan.c
 +++ b/src/hnswscan.c
 @@ -16,6 +16,7 @@ GetScanItems(IndexScanDesc scan, Datum value)
@@ -1253,6 +1307,15 @@ index 955998a..2f24bdf 100644
  	HnswSupport *support = &so->support;
  	List	   *ep;
  	List	   *w;
+@@ -25,7 +26,7 @@ GetScanItems(IndexScanDesc scan, Datum value)
+ 	HnswQuery  *q = &so->q;
+ 
+ 	/* Get m and entry point */
+-	HnswGetMetaPageInfo(index, &m, &entryPoint);
++	HnswGetMetaPageInfo(index, &m, &entryPoint, NULL);
+ 
+ 	q->value = value;
+ 	so->m = m;
 @@ -37,11 +38,11 @@ GetScanItems(IndexScanDesc scan, Datum value)
  
  	for (int lc = entryPoint->level; lc >= 1; lc--)
@@ -1276,6 +1339,24 @@ index 955998a..2f24bdf 100644
  }
  
  /*
+@@ -126,7 +127,16 @@ hnswbeginscan(Relation index, int nkeys, int norderbys)
+ 	scan = RelationGetIndexScan(index, nkeys, norderbys);
+ 
+ 	so = (HnswScanOpaque) palloc(sizeof(HnswScanOpaqueData));
+-	so->typeInfo = HnswGetTypeInfo(index);
++
++	/* Copy base typeInfo and override neighborMetadataBytes from MetaPage */
++	memcpy(&so->typeInfoBuf, HnswGetTypeInfo(index), sizeof(HnswTypeInfo));
++	{
++		int			neighborMetadataBytes;
++
++		HnswGetMetaPageInfo(index, NULL, NULL, &neighborMetadataBytes);
++		so->typeInfoBuf.neighborMetadataBytes = neighborMetadataBytes;
++	}
++	so->typeInfo = &so->typeInfoBuf;
+ 
+ 	/* Set support functions */
+ 	HnswInitSupport(&so->support, index);
 diff --git a/src/hnswtq.c b/src/hnswtq.c
 new file mode 100644
 index 0000000..ba50d6f
@@ -27043,10 +27124,10 @@ index 0000000..ba50d6f
 +};
 diff --git a/src/hnswtq.h b/src/hnswtq.h
 new file mode 100644
-index 0000000..58b6077
+index 0000000..fc41620
 --- /dev/null
 +++ b/src/hnswtq.h
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,53 @@
 +#ifndef HNSW_TQ_H
 +#define HNSW_TQ_H
 +
@@ -27055,68 +27136,45 @@ index 0000000..58b6077
 +/*
 + * TurboQuant constants for HNSW neighbor metadata compression.
 + *
-+ * Algorithm: sub-vector random projection exploiting i.i.d. concentration.
++ * HNSW_TQ_ROTATION_ROWS: number of rows in the precomputed rotation matrix.
++ * For a vector of dimension d, n_rot = Min(d, HNSW_TQ_ROTATION_ROWS) rows are
++ * used when projecting.
 + *
-+ * After a random rotation R, each coordinate of y = R·delta follows
-+ * approximately N(0, ||delta||^2 / d) in high dimensions (concentration of
-+ * measure).  Sub-vectors of y therefore have approximately i.i.d. components,
-+ * which enables a principled 1-D compression via the conditional expectation:
-+ *
-+ *   E[<w_i, s_i> | p_i] = p_i * <w_i, r_i>
-+ *
-+ * where s_i is the i-th sub-vector of the rotated delta, r_i = [1/√K,...,1/√K]
-+ * is the all-ones unit vector, and p_i = <s_i, r_i> = mean(s_i) * √K is the
-+ * stored 1-D projection.  Summing over all M partitions gives an unbiased
-+ * inner product estimator that covers all d input dimensions.
-+ *
-+ * Storage layout
-+ * --------------
-+ * L2 (16 bytes):
-+ *   [0-3]   float32   ||delta||^2  (delta = neighbor - current)
-+ *   [4-15]  uint8×12  M=8 partition scalars, 12 bits each, packed (96 bits)
-+ *            p̃_i = mean(y[i*K:(i+1)*K]) * sqrt(dim) / ||delta||  ≈ N(0,1)
-+ *
-+ * Cosine (8 bytes):
-+ *   [0-7]   uint8×8   M=8 partition scalars, 8 bits each (64 bits)
-+ *            same normalisation as L2 but using K=HNSW_TQ_COSINE_PARTITION_DIM
++ * Cosine distance uses M=8 partitions of K=8 rows (64 rows total).
 + */
 +
-+/* ---- Partition structure ---- */
++/* Total rows in the precomputed rotation matrix */
++#define HNSW_TQ_ROTATION_ROWS           128
 +
-+/* M: number of sub-vector partitions (shared by L2 and cosine) */
-+#define HNSW_TQ_NUM_PARTITIONS          8
++/* ---- L2 quantisation parameters (2-bit normalized Gaussian) ---- */
 +
-+/* K: rotation rows per partition for L2 (12 bits/partition × M = 96 bits) */
-+#define HNSW_TQ_PARTITION_DIM           16
++/*
++ * Correction factor C₂ = E[Z·q̃(Z)] for the symmetric 4-level quantizer of
++ * N(0,1) with thresholds at {-1, 0, +1}.  Output levels are conditional
++ * expectations E[Z|bin]: ±0.4599 (inner bins) and ±1.5252 (outer bins).
++ *
++ * C₂ = 2·(0.4599²·P(0≤Z<1) + 1.5252²·P(Z≥1))
++ *    = 2·(0.4599²·0.34134 + 1.5252²·0.15866) ≈ 0.8828
++ */
++#define HNSW_TQ_L2_2BIT_C2              0.8828f
 +
-+/* Total rotation rows used for L2 = M * K */
-+#define HNSW_TQ_ROTATION_ROWS           (HNSW_TQ_NUM_PARTITIONS * HNSW_TQ_PARTITION_DIM)
++/* Minimum n_rot for 2-bit estimates; below this, use conservative upper bound */
++#define HNSW_TQ_L2_MIN_ROT              8
 +
-+/* K: rotation rows per partition for cosine (8 bits/partition × M = 64 bits) */
++/* ---- Cosine quantisation parameters (sub-vector mean, 8-bit) ---- */
++
++/* M: number of sub-vector partitions for cosine */
++#define HNSW_TQ_COSINE_NUM_PARTITIONS   8
++
++/* K: rotation rows per cosine partition */
 +#define HNSW_TQ_COSINE_PARTITION_DIM    8
 +
-+/* ---- Quantisation parameters ---- */
-+
-+/*
-+ * L2: 12-bit uniform quantiser for p̃_i ≈ N(0,1).
-+ * Range [-CLIP, CLIP] covers >99.99 % of probability mass.
-+ */
-+#define HNSW_TQ_L2_QUANT_LEVELS         4096    /* 2^12 */
-+#define HNSW_TQ_L2_QUANT_CLIP           4.0f
-+
-+/*
-+ * Cosine: 8-bit uniform quantiser for p̃_i ≈ N(0,1).
-+ */
++/* 8-bit uniform quantiser for normalised sub-vector mean ≈ N(0,1) */
 +#define HNSW_TQ_COSINE_QUANT_LEVELS     256     /* 2^8 */
 +#define HNSW_TQ_COSINE_QUANT_CLIP       4.0f
 +
 +/*
 + * Precomputed random rotation matrix (HNSW_TQ_ROTATION_ROWS × HNSW_MAX_DIM).
-+ *
-+ * L2 uses all HNSW_TQ_ROTATION_ROWS = 128 rows.
-+ * Cosine uses the first HNSW_TQ_NUM_PARTITIONS * HNSW_TQ_COSINE_PARTITION_DIM
-+ * = 64 rows (a leading sub-matrix of the same orthogonal basis).
-+ *
 + * Generated by scripts/generate_hnswtq.py with numpy seed=42 and QR
 + * decomposition of a Gaussian matrix.
 + */
@@ -27124,7 +27182,7 @@ index 0000000..58b6077
 +
 +#endif	/* HNSW_TQ_H */
 diff --git a/src/hnswutils.c b/src/hnswutils.c
-index 7afed25..4a0ef9b 100644
+index 7afed25..2bfae46 100644
 --- a/src/hnswutils.c
 +++ b/src/hnswutils.c
 @@ -1,5 +1,6 @@
@@ -27142,7 +27200,59 @@ index 7afed25..4a0ef9b 100644
  #include "lib/pairingheap.h"
  #include "sparsevec.h"
  #include "storage/bufmgr.h"
-@@ -447,7 +449,7 @@ HnswSetElementTuple(char *base, HnswElementTuple etup, HnswElement element)
+@@ -286,11 +288,31 @@ HnswInitElementFromBlock(BlockNumber blkno, OffsetNumber offno)
+ 	return element;
+ }
+ 
++/*
++ * Compute the on-disk neighbor metadata bytes for a given vector dimension.
++ *
++ * Layout: sizeof(float32) for ||delta||^2 + ceil(2*n_rot/8) bytes for 2-bit codes,
++ * where n_rot = Min(dim, HNSW_TQ_ROTATION_ROWS).
++ *
++ * When n_rot < HNSW_TQ_L2_MIN_ROT, only the 4-byte float32 norm is stored;
++ * estimates are too noisy with fewer rotation rows.
++ */
++int
++HnswComputeNeighborMetadataBytes(int dim)
++{
++	int	n_rot = (dim < HNSW_TQ_ROTATION_ROWS) ? dim : HNSW_TQ_ROTATION_ROWS;
++
++	if (n_rot < HNSW_TQ_L2_MIN_ROT)
++		return (int) sizeof(float);		/* norm only; too few rows for reliable estimates */
++
++	return (int) sizeof(float) + (2 * n_rot + 7) / 8;
++}
++
+ /*
+  * Get the metapage info
+  */
+ void
+-HnswGetMetaPageInfo(Relation index, int *m, HnswElement * entryPoint)
++HnswGetMetaPageInfo(Relation index, int *m, HnswElement * entryPoint, int *neighborMetadataBytes)
+ {
+ 	Buffer		buf;
+ 	Page		page;
+@@ -318,6 +340,9 @@ HnswGetMetaPageInfo(Relation index, int *m, HnswElement * entryPoint)
+ 			*entryPoint = NULL;
+ 	}
+ 
++	if (neighborMetadataBytes != NULL)
++		*neighborMetadataBytes = (int) metap->neighborMetadataBytes;
++
+ 	UnlockReleaseBuffer(buf);
+ }
+ 
+@@ -329,7 +354,7 @@ HnswGetEntryPoint(Relation index)
+ {
+ 	HnswElement entryPoint;
+ 
+-	HnswGetMetaPageInfo(index, NULL, &entryPoint);
++	HnswGetMetaPageInfo(index, NULL, &entryPoint, NULL);
+ 
+ 	return entryPoint;
+ }
+@@ -447,7 +472,7 @@ HnswSetElementTuple(char *base, HnswElementTuple etup, HnswElement element)
   * Set neighbor tuple
   */
  void
@@ -27151,7 +27261,7 @@ index 7afed25..4a0ef9b 100644
  {
  	int			idx = 0;
  
-@@ -460,7 +462,8 @@ HnswSetNeighborTuple(char *base, HnswNeighborTuple ntup, HnswElement e, int m)
+@@ -460,7 +485,8 @@ HnswSetNeighborTuple(char *base, HnswNeighborTuple ntup, HnswElement e, int m)
  
  		for (int i = 0; i < lm; i++)
  		{
@@ -27161,7 +27271,7 @@ index 7afed25..4a0ef9b 100644
  
  			if (i < neighbors->length)
  			{
-@@ -468,6 +471,12 @@ HnswSetNeighborTuple(char *base, HnswNeighborTuple ntup, HnswElement e, int m)
+@@ -468,6 +494,12 @@ HnswSetNeighborTuple(char *base, HnswNeighborTuple ntup, HnswElement e, int m)
  				HnswElement hce = HnswPtrAccess(base, hc->element);
  
  				ItemPointerSet(indextid, hce->blkno, hce->offno);
@@ -27174,7 +27284,7 @@ index 7afed25..4a0ef9b 100644
  			}
  			else
  				ItemPointerSetInvalid(indextid);
-@@ -570,6 +579,43 @@ HnswLoadElement(HnswElement element, double *distance, HnswQuery * q, Relation i
+@@ -570,6 +602,43 @@ HnswLoadElement(HnswElement element, double *distance, HnswQuery * q, Relation i
  	HnswLoadElementImpl(element->blkno, element->offno, distance, q, index, support, loadVec, maxDistance, &element);
  }
  
@@ -27218,7 +27328,7 @@ index 7afed25..4a0ef9b 100644
  /*
   * Get the distance for an element
   */
-@@ -594,6 +640,17 @@ HnswInitSearchCandidate(char *base, HnswElement element, double distance)
+@@ -594,6 +663,17 @@ HnswInitSearchCandidate(char *base, HnswElement element, double distance)
  	return sc;
  }
  
@@ -27236,7 +27346,7 @@ index 7afed25..4a0ef9b 100644
  /*
   * Create a candidate for the entry point
   */
-@@ -748,11 +805,13 @@ HnswLoadUnvisitedFromMemory(char *base, HnswElement element, HnswUnvisited * unv
+@@ -748,11 +828,13 @@ HnswLoadUnvisitedFromMemory(char *base, HnswElement element, HnswUnvisited * unv
   * Load neighbor index TIDs
   */
  bool
@@ -27251,7 +27361,7 @@ index 7afed25..4a0ef9b 100644
  	int			start;
  
  	buf = ReadBuffer(index, element->neighborPage);
-@@ -773,37 +832,155 @@ HnswLoadNeighborTids(HnswElement element, ItemPointerData *indextids, Relation i
+@@ -773,37 +855,155 @@ HnswLoadNeighborTids(HnswElement element, ItemPointerData *indextids, Relation i
  
  	/* Copy to minimize lock time */
  	start = (element->level - lc) * m;
@@ -27415,7 +27525,7 @@ index 7afed25..4a0ef9b 100644
  	}
  }
  
-@@ -811,11 +988,12 @@ HnswLoadUnvisitedFromDisk(HnswElement element, HnswUnvisited * unvisited, int *u
+@@ -811,11 +1011,12 @@ HnswLoadUnvisitedFromDisk(HnswElement element, HnswUnvisited * unvisited, int *u
   * Algorithm 2 from paper
   */
  List *
@@ -27429,7 +27539,7 @@ index 7afed25..4a0ef9b 100644
  	int			wlen = 0;
  	visited_hash vh;
  	ListCell   *lc2;
-@@ -825,6 +1003,10 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
+@@ -825,6 +1026,10 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
  	HnswUnvisited *unvisited = palloc(lm * sizeof(HnswUnvisited));
  	int			unvisitedLength;
  	bool		inMemory = index == NULL;
@@ -27440,7 +27550,7 @@ index 7afed25..4a0ef9b 100644
  
  	if (v == NULL)
  	{
-@@ -847,6 +1029,9 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
+@@ -847,6 +1052,9 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
  		localNeighborhood = palloc(neighborhoodSize);
  	}
  
@@ -27450,7 +27560,7 @@ index 7afed25..4a0ef9b 100644
  	/* Add entry points to v, C, and W */
  	foreach(lc2, ep)
  	{
-@@ -883,12 +1068,26 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
+@@ -883,12 +1091,26 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
  		if (c->distance > f->distance)
  			break;
  
@@ -27478,7 +27588,7 @@ index 7afed25..4a0ef9b 100644
  
  		/* OK to count elements instead of tuples */
  		if (tuples != NULL)
-@@ -910,7 +1109,7 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
+@@ -910,7 +1132,7 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
  			}
  			else
  			{
@@ -27487,7 +27597,7 @@ index 7afed25..4a0ef9b 100644
  				BlockNumber blkno = ItemPointerGetBlockNumber(indextid);
  				OffsetNumber offno = ItemPointerGetOffsetNumber(indextid);
  
-@@ -943,23 +1142,62 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
+@@ -943,23 +1165,62 @@ HnswSearchLayer(char *base, HnswQuery * q, List *ep, int ef, int lc, Relation in
  			pairingheap_add(C, &e->c_node);
  			pairingheap_add(W, &e->w_node);
  
@@ -27565,7 +27675,7 @@ index 7afed25..4a0ef9b 100644
  			}
  		}
  	}
-@@ -1267,7 +1505,7 @@ PrecomputeHash(char *base, HnswElement element)
+@@ -1267,7 +1528,7 @@ PrecomputeHash(char *base, HnswElement element)
   * Algorithm 1 from paper
   */
  void
@@ -27574,7 +27684,7 @@ index 7afed25..4a0ef9b 100644
  {
  	List	   *ep;
  	List	   *w;
-@@ -1294,7 +1532,7 @@ HnswFindElementNeighbors(char *base, HnswElement element, HnswElement entryPoint
+@@ -1294,7 +1555,7 @@ HnswFindElementNeighbors(char *base, HnswElement element, HnswElement entryPoint
  	/* 1st phase: greedy search to insert level */
  	for (int lc = entryLevel; lc >= level + 1; lc--)
  	{
@@ -27583,7 +27693,7 @@ index 7afed25..4a0ef9b 100644
  		ep = w;
  	}
  
-@@ -1313,7 +1551,7 @@ HnswFindElementNeighbors(char *base, HnswElement element, HnswElement entryPoint
+@@ -1313,7 +1574,7 @@ HnswFindElementNeighbors(char *base, HnswElement element, HnswElement entryPoint
  		List	   *lw = NIL;
  		ListCell   *lc2;
  
@@ -27592,7 +27702,7 @@ index 7afed25..4a0ef9b 100644
  
  		/* Convert search candidates to candidates */
  		foreach(lc2, w)
-@@ -1370,13 +1608,56 @@ HnswGetTypeInfo(Relation index)
+@@ -1370,13 +1631,63 @@ HnswGetTypeInfo(Relation index)
  
  	if (procinfo == NULL)
  	{
@@ -27603,18 +27713,26 @@ index 7afed25..4a0ef9b 100644
 -		};
 +		FmgrInfo	*distance_procinfo = index_getprocinfo(index, 1, HNSW_DISTANCE_PROC);
 +		FmgrInfo	*norm_procinfo = HnswOptionalProcInfo(index, HNSW_NORM_PROC);
-+
+ 
+-		return (&typeInfo);
 +		/*
 +		 * In case of the L2 distance on single-precision (float) vectors (vector_l2_ops),
 +		 * enables TurboQuant-based metadata storage and distance estimation.
 +		 */
 +		if (HnswIsVectorL2Distance(distance_procinfo))
 +		{
++			/*
++			 * neighborMetadataBytes = 1 is a sentinel meaning "dynamic".
++			 * Callers must override it with HnswComputeNeighborMetadataBytes(dim)
++			 * (written to / read from the MetaPage at build / scan / insert time).
++			 * Any value > 0 here enables neighbor metadata support; the actual
++			 * byte count is always computed from the index dimension at runtime.
++			 */
 +			static const HnswTypeInfo typeInfo = {
 +				.maxDimensions = HNSW_MAX_DIM,
 +				.normalize = l2_normalize,
 +				.checkValue = NULL,
-+				.neighborMetadataBytes = HNSW_NEIGHBOR_VECTOR_L2_METADATA_BYTES,
++				.neighborMetadataBytes = 1,
 +				.setNeighborMetadata = HnswSetVectorL2NeighborMetadata,
 +				.estimateDistances = HnswEstimateVectorL2Distances
 +			};
@@ -27635,8 +27753,7 @@ index 7afed25..4a0ef9b 100644
 +				.setNeighborMetadata = HnswSetVectorCosineNeighborMetadata,
 +				.estimateDistances = HnswEstimateVectorCosines
 +			};
- 
--		return (&typeInfo);
++
 +			return (&typeInfo);
 +		}
 +		else
@@ -27656,7 +27773,7 @@ index 7afed25..4a0ef9b 100644
  	else
  		return (const HnswTypeInfo *) DatumGetPointer(FunctionCall0Coll(procinfo, InvalidOid));
 diff --git a/src/hnswvacuum.c b/src/hnswvacuum.c
-index 251d9d9..1798c70 100644
+index 251d9d9..81ab595 100644
 --- a/src/hnswvacuum.c
 +++ b/src/hnswvacuum.c
 @@ -138,6 +138,8 @@ static bool
@@ -27664,7 +27781,7 @@ index 251d9d9..1798c70 100644
  {
  	Relation	index = vacuumstate->index;
 +	bool		neighborMetadata = HnswSupportNeighborMetadata(index);
-+	const		HnswTypeInfo *typeInfo = HnswGetTypeInfo(index);
++	const		HnswTypeInfo *typeInfo = vacuumstate->typeInfo;
  	BufferAccessStrategy bas = vacuumstate->bas;
  	Buffer		buf;
  	Page		page;
@@ -27694,7 +27811,7 @@ index 251d9d9..1798c70 100644
  {
  	Relation	index = vacuumstate->index;
 +	bool		neighborMetadata = HnswSupportNeighborMetadata(index);
-+	const		HnswTypeInfo *typeInfo = HnswGetTypeInfo(index);
++	const		HnswTypeInfo *typeInfo = vacuumstate->typeInfo;
  	HnswSupport *support = &vacuumstate->support;
  	Buffer		buf;
  	Page		page;
@@ -27738,7 +27855,7 @@ index 251d9d9..1798c70 100644
  	BlockNumber insertPage = InvalidBlockNumber;
  	Relation	index = vacuumstate->index;
 +	bool		neighborMetadata = HnswSupportNeighborMetadata(index);
-+	const		HnswTypeInfo *typeInfo = HnswGetTypeInfo(index);
++	const		HnswTypeInfo *typeInfo = vacuumstate->typeInfo;
  	BufferAccessStrategy bas = vacuumstate->bas;
  
  	/*
@@ -27754,19 +27871,39 @@ index 251d9d9..1798c70 100644
  
  			/* Increment version */
  			/* This is used to avoid incorrect reads for iterative scans */
+@@ -588,8 +600,15 @@ InitVacuumState(HnswVacuumState * vacuumstate, IndexVacuumInfo *info, IndexBulkD
+ 
+ 	HnswInitSupport(&vacuumstate->support, index);
+ 
+-	/* Get m from metapage */
+-	HnswGetMetaPageInfo(index, &vacuumstate->m, NULL);
++	/* Get m and neighborMetadataBytes from metapage, and set up typeInfo */
++	{
++		int			neighborMetadataBytes;
++
++		HnswGetMetaPageInfo(index, &vacuumstate->m, NULL, &neighborMetadataBytes);
++		memcpy(&vacuumstate->typeInfoBuf, HnswGetTypeInfo(index), sizeof(HnswTypeInfo));
++		vacuumstate->typeInfoBuf.neighborMetadataBytes = neighborMetadataBytes;
++		vacuumstate->typeInfo = &vacuumstate->typeInfoBuf;
++	}
+ 
+ 	/* Create hash table */
+ 	vacuumstate->deleted = tidhash_create(CurrentMemoryContext, 256, NULL);
 diff --git a/test/t/017_hnsw_filtering.pl b/test/t/017_hnsw_filtering.pl
-index afa2a1c..00b6a9d 100644
+index afa2a1c..ab10713 100644
 --- a/test/t/017_hnsw_filtering.pl
 +++ b/test/t/017_hnsw_filtering.pl
-@@ -19,8 +19,10 @@ $node->start;
+@@ -19,8 +19,12 @@ $node->start;
  $node->safe_psql("postgres", "CREATE EXTENSION vector;");
  $node->safe_psql("postgres", "CREATE TABLE tst (i int4, v vector($dim), c int4, t text);");
  $node->safe_psql("postgres", "CREATE TABLE cat (i int4 PRIMARY KEY, t text, b boolean);");
-+# Increase the number of rows in tst because the cost of index access paths increases due to index size growth
-+# from neighbor metadata, resulting in partial index not being selected in the last test
++# Row count is chosen so seq scan startup cost exceeds HNSW index startup cost (Seq Scan tests
++# below pass), while the partial index test still selects the partial HNSW index.
++# With neighbor metadata = 4 bytes (dim=3 < HNSW_TQ_L2_MIN_ROT), the index is smaller than
++# with the original 16-byte fixed metadata, so fewer rows suffice for seq scan to win.
  $node->safe_psql("postgres",
 -	"INSERT INTO tst SELECT i, ARRAY[$array_sql], i % $nc, 'test ' || i FROM generate_series(1, 10000) i;"
-+	"INSERT INTO tst SELECT i, ARRAY[$array_sql], i % $nc, 'test ' || i FROM generate_series(1, 30000) i;"
++	"INSERT INTO tst SELECT i, ARRAY[$array_sql], i % $nc, 'test ' || i FROM generate_series(1, 20000) i;"
  );
  $node->safe_psql("postgres",
  	"INSERT INTO cat SELECT i, 'cat ' || i, i % 5 = 0 FROM generate_series(1, $nc) i;"

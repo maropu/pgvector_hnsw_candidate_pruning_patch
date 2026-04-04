@@ -102,6 +102,14 @@ def parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 def run_benchmark(args: argparse.Namespace) -> None:
+    # run.py fails if a results directory for the dataset already exists.
+    # Remove its contents before starting so each run begins from a clean state.
+    results_dir = ANN_DIR / "results" / args.dataset
+    if results_dir.exists():
+        import shutil
+        print(f"[benchmark] removing existing results: {results_dir}")
+        shutil.rmtree(results_dir)
+
     env = os.environ.copy()
     env.update({
         "ANN_BENCHMARKS_PG_HOST": args.host,
