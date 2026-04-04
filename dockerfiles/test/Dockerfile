@@ -14,29 +14,106 @@
 #      includes the tests that are modified or added by the patches.
 #
 # =============================================================================
+# WHAT THIS DOCKERFILE DOES
+# =============================================================================
+#   1. Installs build and test tools (gcc, make, perl, postgresql-server-dev)
+#      via apt.
+#   2. Fetches pgvector source at the specified git ref from GitHub (BuildKit).
+#   3. Copies the patch file from the repository root into the source tree.
+#   4. Dry-runs the patch for early diagnostics, then applies it.
+#   5. Compiles vector.so (USE_PGXS=1, no optimisation flags).
+#   6. Installs the extension into the system PostgreSQL installation.
+#   7. Runs SQL regression tests (make installcheck) against a temporary
+#      cluster started and stopped within the same layer.
+#   8. Runs a targeted set of TAP tests (make prove_installcheck) that cover
+#      the code paths touched by the candidate-pruning patches.
+#
+#   The image exits 0 only when all tests pass.  A non-zero exit code means
+#   at least one test failed — inspect the build log for details.
+#
+# =============================================================================
+# REQUIREMENTS
+# =============================================================================
+#   - Docker with BuildKit enabled (required for ADD <git-url>#<ref>).
+#     BuildKit is the default in Docker 23+; for older versions set:
+#       DOCKER_BUILDKIT=1
+#   - Build context must be the repository root (contains the .patch file).
+#   - Internet access at build time to fetch pgvector source from GitHub.
+#
+# =============================================================================
 # BUILD ARGUMENTS
 # =============================================================================
 #   PG_MAJOR      PostgreSQL major version.  Default: 17
 #   PGVECTOR_REF  pgvector git ref (tag or commit SHA).  Default: v0.8.0
 #   PATCH_FILE    Patch filename (must exist in the repository root).
 #                 Default: pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch
+#                 Available patches (see repo root):
+#                   pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch
+#                   pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch
+#                   pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch
 #
 # =============================================================================
-# BUILD EXAMPLE
+# BUILD EXAMPLES
 # =============================================================================
+#   # turboquant patch (default)
 #   docker build \
 #     --build-arg PATCH_FILE=pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch \
 #     -t pgvector-test:pg17-turboquant \
 #     -f dockerfiles/test/Dockerfile .
 #
+#   # simhash patch
+#   docker build \
+#     --build-arg PATCH_FILE=pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch \
+#     -t pgvector-test:pg17-simhash \
+#     -f dockerfiles/test/Dockerfile .
+#
+#   # pq patch
+#   docker build \
+#     --build-arg PATCH_FILE=pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch \
+#     -t pgvector-test:pg17-pq \
+#     -f dockerfiles/test/Dockerfile .
+#
+#   # Different PostgreSQL version
+#   docker build \
+#     --build-arg PG_MAJOR=16 \
+#     --build-arg PATCH_FILE=pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch \
+#     -t pgvector-test:pg16-simhash \
+#     -f dockerfiles/test/Dockerfile .
+#
+# =============================================================================
+# LAYER CACHING NOTE (patch iteration)
+# =============================================================================
+#   apt-get and the GitHub source fetch are ordered BEFORE COPY ${PATCH_FILE},
+#   so those layers remain cached even when the patch file changes.  Only the
+#   patch-apply, make, and test steps re-run on each patch iteration.
+#
+# =============================================================================
+# TAP TEST COVERAGE
+# =============================================================================
+#   The PROVE_TESTS subset covers tests that are modified or added by the
+#   candidate-pruning patches:
+#
+#   012  hnsw_vector_build_recall    — HNSW build recall (core correctness)
+#   013  hnsw_vector_insert_recall   — HNSW incremental insert recall
+#   017  hnsw_filtering              — HNSW filtering (modified by patches)
+#   039  hnsw_cost                   — HNSW cost estimation (modified by patches)
+#   043  hnsw_iterative_scan         — HNSW iterative scan (modified by patches)
+#   044  hnsw_iterative_scan_recall  — HNSW iterative scan recall
+#
+#   Each TAP test script spins up its own temporary PostgreSQL cluster via
+#   PostgreSQL::Test::Cluster, so no pre-running server is needed.
+#
 # =============================================================================
 # NOTES
 # =============================================================================
-#   - The image exits 0 only when all tests pass; a non-zero exit code means
-#     at least one test failed — check the build log for details.
+#   - This image is not meant to be run as a container after build.  It is
+#     used purely as a build-time test harness.
 #   - ABI compatibility: the base image pins the PostgreSQL major version, so
 #     the compiled vector.so matches the server that runs the tests.
 #   - Internet access is required at build time to fetch pgvector from GitHub.
+#   - On test failure the build log contains the PostgreSQL server log
+#     (/tmp/pg.log) and regression diffs (regression.diffs) for SQL tests,
+#     or the TAP log files for TAP tests.
 
 ARG PG_MAJOR=17
 ARG PGVECTOR_REF=v0.8.0
