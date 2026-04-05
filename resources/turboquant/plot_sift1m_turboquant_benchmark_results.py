@@ -13,12 +13,12 @@ def plot_results():
     blocks_tq_k3 = [238.020, 393.300, 654.520, 1209.140, 1719.840, 2616.260, 4949.980, 9380.260]
 
     # k=5
-    recall_tq_k5 = []
-    blocks_tq_k5 = []
+    recall_tq_k5 = [0.2561, 0.3787, 0.5094, 0.6385, 0.7042, 0.7793, 0.8629, 0.9253]
+    blocks_tq_k5 = [329.580, 546.720, 915.980, 1653.840, 2282.540, 3467.040, 6273.000, 11993.880]
 
     # k=7
-    recall_tq_k7 = []
-    blocks_tq_k7 = []
+    recall_tq_k7 = [0.3504, 0.488, 0.6253, 0.7428, 0.8036, 0.86654, 0.9312, 0.9710]
+    blocks_tq_k7 = [433.220, 704.620, 1183.400, 2048.620, 2849.100, 4309.780, 7777.620, 14968.820]
 
     # Plot results
     plt.plot(recall_vanilla, blocks_vanilla, marker='s', color="black", linewidth=2, label="vanilla pgvector")
