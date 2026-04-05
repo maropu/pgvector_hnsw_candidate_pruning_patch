@@ -23,14 +23,14 @@ jobs:
         patch_file:
           - "pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch"
           - "pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch"
-          - "pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch"
+          # - "pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch"
         include:
           - patch_file: "pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch"
             patch_name: "SimHash"
           - patch_file: "pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch"
             patch_name: "PQ"
-          - patch_file: "pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch"
-            patch_name: "TurboQuant"
+          # - patch_file: "pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch"
+          #   patch_name: "TurboQuant"
 
     # NOTE: 'container.image' cannot use the 'env' context at compile time.
     # If PG_MAJOR is changed above, update this tag accordingly.
@@ -135,14 +135,14 @@ jobs:
         patch_file:
           - "pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch"
           - "pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch"
-          - "pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch"
+          # - "pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch"
         include:
           - patch_file: "pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch"
             patch_name: "SimHash"
           - patch_file: "pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch"
             patch_name: "PQ"
-          - patch_file: "pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch"
-            patch_name: "TurboQuant"
+          # - patch_file: "pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch"
+          #   patch_name: "TurboQuant"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

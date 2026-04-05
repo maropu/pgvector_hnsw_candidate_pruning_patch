@@ -24,14 +24,11 @@ jobs:
         patch_file:
           - "pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch"
           - "pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch"
-          - "pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch"
         include:
           - patch_file: "pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch"
             patch_name: "SimHash"
           - patch_file: "pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch"
             patch_name: "PQ"
-          - patch_file: "pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch"
-            patch_name: "TurboQuant"
     env:
       DOCKER_BUILDKIT: "1"
 

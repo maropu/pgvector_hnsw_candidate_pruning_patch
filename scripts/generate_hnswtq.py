@@ -6,11 +6,13 @@ generate_hnswtq.py — generator for pgvector/src/hnswtq.c
 This script materializes the compile-time constants required by the
 TurboQuant HNSW candidate-pruning patch:
 
-  1. A random rotation matrix Pi (quant_dim x max_dim), generated via
-     QR decomposition of a Gaussian matrix (numpy seed).  Only the first
-     quant_dim rows are kept; these are used to project edge vectors into
-     a space where each coordinate follows ~N(0, 1/d), enabling independent
-     scalar quantization per coordinate.
+  1. A random rotation matrix Q (max_dim x max_dim), generated via
+     QR decomposition of a Gaussian matrix (numpy seed).  The full square
+     matrix is stored so that a single precomputed matrix can be reused
+     for input vectors of any dimension d <= max_dim: a d-dimensional vector
+     is conceptually zero-filled to max_dim before rotation, and only the
+     first d rows of Q are applied (the zero-padded coordinates contribute
+     nothing to the dot product, preserving the orthonormal row property).
 
   2. (Informational) The Lloyd-Max codebook for N(0,1) with 2^bit_width
      levels, solved via the iterative Lloyd-Max algorithm.  The codebook
@@ -20,21 +22,19 @@ TurboQuant HNSW candidate-pruning patch:
 
 What it generates:
   - src/hnswtq.c  containing:
-        const float hnsw_tq_rotation[HNSW_TQ_QUANT_DIM_MAX][HNSW_MAX_DIM]
+        const float hnsw_tq_rotation[HNSW_MAX_DIM][HNSW_MAX_DIM]
 
 Design notes:
-  - quant_dim defaults to 48 (fits in 12 bytes at b=2: 48*2/8 = 12).
   - max_dim  defaults to 2000 (HNSW_MAX_DIM in hnsw.h).
   - bit_width defaults to 2 (4 Lloyd-Max centroids).
   - The RNG seed is fixed so the generated file is reproducible.
 
 Usage:
   python generate_hnswtq.py \\
-      --quant-dim 48 \\
       --max-dim   2000 \\
       --bit-width 2 \\
       --seed      42 \\
-      --out       ../pgvector/src/hnswtq.c
+      --out       pgvector/src/hnswtq.c
 """
 
 import argparse
@@ -102,16 +102,15 @@ def lloyd_max_gaussian(num_levels: int, sigma: float = 1.0, max_iter: int = 200)
 # Rotation matrix
 # ---------------------------------------------------------------------------
 
-def gen_rotation_matrix(quant_dim: int, max_dim: int, seed: int) -> np.ndarray:
+def gen_rotation_matrix(max_dim: int, seed: int) -> np.ndarray:
     """
     Generate a random orthogonal matrix via QR decomposition of a Gaussian
-    matrix, then return its first *quant_dim* rows.
+    matrix.  Returns the full (max_dim x max_dim) orthogonal matrix Q.
 
-    The full matrix is (max_dim x max_dim); we only retain the first
-    quant_dim rows so the output shape is (quant_dim, max_dim).
-
-    quant_dim = HNSW_TQ_NUM_PARTITIONS * HNSW_TQ_PARTITION_DIM = 128 by
-    default, covering all dimensions of SIFT1M (d=128) with full fidelity.
+    The square matrix enables reuse across input dimensions: for a
+    d-dimensional input vector (d <= max_dim), zero-fill to max_dim and
+    apply the first d rows of Q.  Only the first d columns of each row
+    contribute (zero-padded entries vanish), preserving orthonormality.
 
     Uses the legacy numpy.random API (np.random.seed + np.random.randn) so
     that the output is bit-for-bit identical to the shipped hnswtq.c.
@@ -125,13 +124,12 @@ def gen_rotation_matrix(quant_dim: int, max_dim: int, seed: int) -> np.ndarray:
     Q = (Q * diag_sign[np.newaxis, :]).astype(np.float32)
 
     # Sanity check: rows should be mutually orthonormal
-    sub = Q[:quant_dim, :]
-    err = float(np.max(np.abs(sub @ sub.T - np.eye(quant_dim))))
+    err = float(np.max(np.abs(Q @ Q.T - np.eye(max_dim))))
     if err > 1e-4:
         print(f"[WARNING] Orthogonality error {err:.2e} exceeds 1e-4 — "
               "check numpy/LAPACK version.", file=sys.stderr)
 
-    return sub  # shape: (quant_dim, max_dim)
+    return Q  # shape: (max_dim, max_dim)
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +140,7 @@ def c_float_literal(x: float) -> str:
     return f"{x:.8e}f"
 
 
-def emit_c_file(out_path: str, Q: np.ndarray, quant_dim: int, max_dim: int,
+def emit_c_file(out_path: str, Q: np.ndarray, max_dim: int,
                 bit_width: int, seed: int):
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     py_ver = platform.python_version()
@@ -156,7 +154,7 @@ def emit_c_file(out_path: str, Q: np.ndarray, quant_dim: int, max_dim: int,
         f.write(" * hnswtq.c — Auto-generated TurboQuant constants for pgvector (HNSW)\n")
         f.write(" *\n")
         f.write(f" * Generated : {ts}\n")
-        f.write(f" * Arguments : quant_dim={quant_dim}, max_dim={max_dim}, "
+        f.write(f" * Arguments : max_dim={max_dim}, "
                 f"bit_width={bit_width}, seed={seed}\n")
         f.write(f" * Python    : {py_ver}\n")
         f.write(f" * NumPy     : {np_ver}\n")
@@ -180,18 +178,21 @@ def emit_c_file(out_path: str, Q: np.ndarray, quant_dim: int, max_dim: int,
 
         # Rotation matrix
         f.write("/*\n")
-        f.write(f" * Random rotation matrix: first {quant_dim} rows of a {max_dim}x{max_dim}\n")
-        f.write(f" * orthogonal matrix Q obtained by QR decomposition of a Gaussian matrix\n")
-        f.write(f" * (numpy seed={seed}).  Shape: [{quant_dim}][{max_dim}].\n")
-        f.write(f" * Orthogonality check (Q[:quant_dim] @ Q[:quant_dim]^T ≈ I_{quant_dim}):\n")
-        sub = Q[:quant_dim, :]
-        err = float(np.max(np.abs(sub @ sub.T - np.eye(quant_dim))))
-        f.write(f" *   max |QQ^T - I| = {err:.2e}\n")
+        f.write(f" * Random rotation matrix: {max_dim}x{max_dim} orthogonal matrix Q\n")
+        f.write(f" * obtained by QR decomposition of a Gaussian matrix (numpy seed={seed}).\n")
+        f.write(f" * Shape: [{max_dim}][{max_dim}].\n")
+        f.write(f" *\n")
+        f.write(f" * For a d-dimensional input vector (d <= {max_dim}): apply the first d rows\n")
+        f.write(f" * of Q to the vector (conceptually zero-filled to {max_dim} dimensions).\n")
+        f.write(f" * Only the first d columns of each row contribute, preserving orthonormality.\n")
+        err = float(np.max(np.abs(Q @ Q.T - np.eye(max_dim))))
+        f.write(f" *\n")
+        f.write(f" * Orthogonality check (Q @ Q^T ≈ I_{max_dim}): max |QQ^T - I| = {err:.2e}\n")
         f.write(" */\n")
         f.write(f"const float hnsw_tq_rotation"
-                f"[HNSW_TQ_ROTATION_ROWS][HNSW_MAX_DIM] = {{\n")
+                f"[HNSW_MAX_DIM][HNSW_MAX_DIM] = {{\n")
 
-        for i in range(quant_dim):
+        for i in range(max_dim):
             row = Q[i]
             f.write(f"\t/* row {i} */\n\t{{")
             vals = [c_float_literal(v) for v in row]
@@ -203,14 +204,14 @@ def emit_c_file(out_path: str, Q: np.ndarray, quant_dim: int, max_dim: int,
                     f.write(", ")
                 f.write(v)
             f.write("}")
-            if i < quant_dim - 1:
+            if i < max_dim - 1:
                 f.write(",")
             f.write("\n")
 
         f.write("};\n")
 
     print(f"[generate_hnswtq.py] wrote: {out_path} "
-          f"(quant_dim={quant_dim}, max_dim={max_dim}, seed={seed})")
+          f"(max_dim={max_dim}, seed={seed})")
 
 
 # ---------------------------------------------------------------------------
@@ -222,12 +223,9 @@ def main():
         description="Generate pgvector/src/hnswtq.c with TurboQuant rotation matrix."
     )
     ap.add_argument(
-        "--quant-dim", type=int, default=128,
-        help="number of rotation rows to keep (default: 128 = HNSW_TQ_NUM_PARTITIONS * HNSW_TQ_PARTITION_DIM)"
-    )
-    ap.add_argument(
         "--max-dim", type=int, default=2000,
-        help="maximum vector dimension, must match HNSW_MAX_DIM (default: 2000)"
+        help="rotation matrix dimension D; generates a DxD orthogonal matrix "
+             "reusable for any input dimension d <= D (default: 2000 = HNSW_MAX_DIM)"
     )
     ap.add_argument(
         "--bit-width", type=int, default=2,
@@ -243,18 +241,15 @@ def main():
     )
     args = ap.parse_args()
 
-    if args.quant_dim <= 0 or args.max_dim <= 0:
-        print("--quant-dim and --max-dim must be positive", file=sys.stderr)
-        sys.exit(1)
-    if args.quant_dim > args.max_dim:
-        print("--quant-dim must be <= --max-dim", file=sys.stderr)
+    if args.max_dim <= 0:
+        print("--max-dim must be positive", file=sys.stderr)
         sys.exit(1)
     if args.bit_width not in (1, 2, 3, 4):
         print("--bit-width must be one of 1, 2, 3, 4", file=sys.stderr)
         sys.exit(1)
 
-    Q = gen_rotation_matrix(args.quant_dim, args.max_dim, args.seed)
-    emit_c_file(args.out, Q, args.quant_dim, args.max_dim, args.bit_width, args.seed)
+    Q = gen_rotation_matrix(args.max_dim, args.seed)
+    emit_c_file(args.out, Q, args.max_dim, args.bit_width, args.seed)
 
 
 if __name__ == "__main__":
