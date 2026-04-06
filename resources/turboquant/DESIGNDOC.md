@@ -7,7 +7,43 @@ Amir Zandieh, Majid Daliri, Vahab Mirrokni, Majid Hadian. "TurboQuant: Online Ve
 
 ---
 
-## 1. TurboQuant Algorithm Specification (MSE-Optimized)
+## 1. Design Rationale: Why Q_mse Only
+
+This implementation adopts only TurboQuant's MSE-optimized quantizer ($Q_{\text{mse}}$, Algorithm 1 in the paper). The paper's inner-product-optimized quantizer ($Q_{\text{prod}}$, Algorithm 2) and the related PolarQuant approach were evaluated and deliberately excluded. This section documents the rationale.
+
+### 1.1 Why Not Q_prod (QJL Residual Correction)
+
+$Q_{\text{prod}}$ allocates one bit of the total budget to a QJL (Quantized Johnson-Lindenstrauss) transform on the MSE residual, producing an unbiased inner product estimator. With a target bit-width of $b$, the MSE stage uses only $b - 1$ bits, and the remaining 1 bit is spent on the QJL sign sketch.
+
+**At b=2, variance increases outweigh bias removal.**
+When $b = 2$ (our operating point), $Q_{\text{prod}}$ reduces the MSE stage to 1-bit quantization. The paper's Theorem 1 gives $D_{\text{mse}}(b=1) \approx 0.36$ versus $D_{\text{mse}}(b=2) \approx 0.117$—a 3× increase in reconstruction error. While the QJL stage removes the multiplicative bias, the inner product distortion bound from Theorem 2 is $D_{\text{prod}}(b=2) \approx 0.56/d$, versus $D_{\text{mse}}(b=2) \approx 0.117/d$ (plus a small bias). The net effect is higher variance in the distance estimate, which degrades pruning quality.
+
+**Bias in Q_mse acts conservatively for HNSW pruning.**
+The MSE quantizer's bias attenuates the estimated inner product ($\hat{\cos\theta} \approx \alpha \cos\theta$, $\alpha < 1$). In the L2 distance formula $\hat{d} = \|v\|^2 + \|\delta\|^2 - 2\|v\|\|\delta\|\hat{\cos\theta}$, this causes distance *overestimation*. For candidate pruning, overestimation is the safe direction: it may skip a candidate that was actually slightly better (reducing QPS), but it never promotes a poor candidate above a good one (preserving recall). An unbiased estimator with higher variance can cause both over- and under-estimation, the latter being harmful to recall.
+
+**Implementation cost is prohibitive.**
+$Q_{\text{prod}}$ requires:
+- An additional random matrix $S \in \mathbb{R}^{d \times d}$ with i.i.d. $\mathcal{N}(0,1)$ entries (separate from the rotation matrix $\Pi$), adding ~$d^2 \times 4$ bytes of compile-time storage.
+- Storing the residual norm $\|r\|_2$ per edge (+4 bytes/edge metadata).
+- Computing $S \cdot v$ for each query direction at scan time ($O(d^2)$ per visited node, in addition to the existing rotation $\Pi \cdot v$).
+
+These costs are disproportionate to the marginal accuracy gain at $b = 2$.
+
+### 1.2 Why Not PolarQuant
+
+PolarQuant (Han et al., arXiv:2502.02617, 2025) decomposes each vector into norm and direction, applies a random rotation to the direction, then quantizes the rotated coordinates. During dequantization, it re-normalizes the reconstructed direction to unit norm, which minimizes the MSE of the *direction* component.
+
+**PolarQuant's re-normalization optimizes vector reconstruction, not scalar inner product estimation.**
+Our use case estimates individual scalar inner products $\langle v, \delta \rangle$ from quantized codes, using the Lloyd-Max conditional expectation $E[Z \mid \text{bin } k]$ as the dequantized value for each coordinate. This is already the MMSE (minimum mean-squared error) estimator for each scalar, and is optimal for inner product estimation via linearity of expectation.
+
+PolarQuant's re-normalization step (projecting back onto the unit sphere) is a nonlinear operation that improves the L2 reconstruction of the *full vector* but does not improve—and can degrade—the accuracy of coordinate-wise inner product accumulation. In our pipeline, we never reconstruct the full vector; we only compute $\sum_j w_j \cdot \hat{q}_j$ where $\hat{q}_j$ are the Lloyd-Max centroids. Applying re-normalization would break this linear accumulation structure.
+
+**No additional benefit for the pruning pipeline.**
+Since we estimate $\langle v, \delta \rangle$ as a sum of scalar products and never reconstruct $\delta$ explicitly, PolarQuant's direction-aware dequantization provides no advantage over coordinate-wise Lloyd-Max decoding.
+
+---
+
+## 2. TurboQuant Algorithm Specification (MSE-Optimized)
 
 ### Global Parameters (Pre-computed and Retained Data)
 For implementation, the following two sets of data must be prepared as constants at compile-time or runtime.
@@ -49,7 +85,7 @@ The process of reconstructing the original vector (approximation) from the index
 
 ---
 
-## 2. pgvector HNSW Implementation Design
+## 3. pgvector HNSW Implementation Design
 
 ### Architecture Overview
 This implementation introduces distance estimation and Candidate Pruning utilizing the TurboQuant (TQ) algorithm into `pgvector`'s HNSW index. During high-dimensional vector neighborhood searches, instead of performing exact distance calculations (high-cost operations using SIMD, etc.) for all candidates, it rapidly estimates distances using 2-bit quantized metadata stored in the edges (adjacency lists), narrowing down the exhaustive search to only the most promising top candidates.
