@@ -90,6 +90,31 @@ The process of reconstructing the original vector (approximation) from the index
 ### Architecture Overview
 This implementation introduces distance estimation and Candidate Pruning utilizing the TurboQuant (TQ) algorithm into `pgvector`'s HNSW index. During high-dimensional vector neighborhood searches, instead of performing exact distance calculations (high-cost operations using SIMD, etc.) for all candidates, it rapidly estimates distances using 2-bit quantized metadata stored in the edges (adjacency lists), narrowing down the exhaustive search to only the most promising top candidates.
 
+### Dimension Subsampling
+
+The original TurboQuant paper quantizes all $d$ rotated coordinates. For the candidate pruning use case, the metadata budget per edge is fixed at `HNSW_NEIGHBOR_METADATA_MAX_BYTES` = 16 bytes (matching the SimHash and PQ patch methods). After subtracting `sizeof(float32)` = 4 bytes for the stored norm, 12 bytes remain for 2-bit codes, accommodating at most $m = 12 \times 8 / 2 = 48$ rotated coordinates.
+
+When $d > 48$ (e.g., SIFT1M with $d = 128$), only the first $m = 48$ rows of the $N \times N$ rotation matrix are used. This is valid because the random rotation mixes all $d$ input dimensions into every rotated coordinate; the first $m$ coordinates act as an $m$-dimensional random projection of the $d$-dimensional input (analogous to the Johnson-Lindenstrauss property).
+
+**Variance analysis.** The inner product estimation variance decomposes into subsampling and quantization terms:
+
+$$\text{Var}(\widehat{IP}(m, b)) \approx \frac{(1 + \mathcal{C}(f_X, b))\|v\|^2\|\delta\|^2 + \langle v, \delta \rangle^2}{m}$$
+
+where $\mathcal{C}(f_X, b)$ is the scalar MSE cost ($\approx 0.117$ for $b = 2$). The quantization contribution ($0.117$) is only ~12% of the subsampling contribution ($1.0$), so reducing $m$ from $d$ to 48 primarily increases the subsampling term. For SIFT1M ($d = 128$), the standard deviation increases by a factor of $\sqrt{128/48} \approx 1.63$.
+
+**Practical benefits:**
+- **Fixed metadata size**: 16 bytes per edge regardless of input dimension, matching the SimHash patch budget.
+- **Reduced rotation cost**: $O(m \times d)$ instead of $O(d^2)$ at both build and scan time.
+- **Acceptable accuracy**: For candidate ranking (not exact distance computation), the moderate variance increase is tolerable since the top-k selection only requires correct relative ordering among the best candidates.
+
+**Macro definitions** (in `src/hnswtq.h`):
+```c
+#define HNSW_TQ_CODE_BYTES     (HNSW_NEIGHBOR_METADATA_MAX_BYTES - (int) sizeof(float))  /* 12 */
+#define HNSW_TQ_MAX_ROT_DIMS   ((HNSW_TQ_CODE_BYTES * 8) / HNSW_TQ_BIT_WIDTH)           /* 48 */
+```
+
+All encode/decode paths use $m = \min(d,\, \texttt{HNSW\_TQ\_MAX\_ROT\_DIMS})$ as the effective number of rotated coordinates, and the decode divisor is $m / \sqrt{N}$ (not $d / \sqrt{N}$).
+
 ### Generation of Compile-time Constants (Python Script Specification)
 To reduce runtime computational costs, the random rotation matrix $\Pi$ is embedded as a compile-time constant in `src/hnswtq.c`. The script specifications for regeneration are as follows:
 
@@ -115,14 +140,15 @@ To reduce runtime computational costs, the random rotation matrix $\Pi$ is embed
     # 4. Output as a C language const float array
     # `const float hnsw_tq_rotation[2000][2000] = { ... };`
     ```
-* **Implementation Note:** Theoretically, a matrix following $\mathcal{N}(0, 1/d)$ is required, but here we output a matrix based on $\mathcal{N}(0, 1)$. Because the rotation matrix is $N \times N$ (where $N$ = `HNSW_MAX_DIM` = 2000), each entry has magnitude $\sim 1/\sqrt{N}$. For a $d$-dimensional input ($d \leq N$), only the top-left $d \times d$ subblock is used, so each rotated coordinate has variance $\|\delta\|^2 / N$ (not $\|\delta\|^2 / d$). The encode normalizer therefore uses $\sqrt{N}$ (not $\sqrt{d}$) to map to $\mathcal{N}(0, 1)$ before quantization. On the decode side, the partial rotation captures only $d/N$ of the true inner product, so the decode divisor is $d / \sqrt{N}$.
+* **Implementation Note:** Theoretically, a matrix following $\mathcal{N}(0, 1/d)$ is required, but here we output a matrix based on $\mathcal{N}(0, 1)$. Because the rotation matrix is $N \times N$ (where $N$ = `HNSW_MAX_DIM` = 2000), each entry has magnitude $\sim 1/\sqrt{N}$. For a $d$-dimensional input ($d \leq N$), only the first $m = \min(d, \texttt{HNSW\_TQ\_MAX\_ROT\_DIMS})$ rows and $d$ columns are used (dimension subsampling), so each rotated coordinate has variance $\|\delta\|^2 / N$ (not $\|\delta\|^2 / d$). The encode normalizer uses $\sqrt{N}$ (not $\sqrt{d}$) to map to $\mathcal{N}(0, 1)$ before quantization. On the decode side, the $m$-row partial rotation captures only $m/N$ of the true inner product, so the decode divisor is $m / \sqrt{N}$.
 
 ### Data Structure and Storage Layout
 
 **Metadata Page (`HnswMetaPageData`)**
 During index construction, the variable-length metadata size is calculated from the target vector's dimension $d$ and persisted in the metadata page.
 * **Added Field:** `uint16 neighborMetadataSize;`
-* **Calculation Logic:** `sizeof(float4) + ceil((d * 2.0) / 8.0)`
+* **Calculation Logic:** `sizeof(float4) + ceil((m * 2.0) / 8.0)` where $m = \min(d, \texttt{HNSW\_TQ\_MAX\_ROT\_DIMS})$.
+    * The metadata size is capped at `HNSW_NEIGHBOR_METADATA_MAX_BYTES` (16 bytes) regardless of input dimension.
     * For low dimensions (e.g., under 8 dimensions, below `HNSW_TQ_L2_MIN_DIM`), the pruning accuracy is unstable. Thus, TQ compression is skipped, and the logic falls back to `sizeof(float4)` (storing only exact distance upper bounds, etc.).
 
 **Neighbor Tuple (`HnswNeighborTupleData`)**
@@ -131,7 +157,7 @@ Data is packed in the following layout immediately after the TID in each adjacen
 | Offset | Type | Size | Content |
 | :--- | :--- | :--- | :--- |
 | `0` | `float4` | 4 bytes | **Sum of Squares**: The $L2$ norm of the difference vector. |
-| `4` | `uint8[]` | Variable | **TQ Codes**: 2-bit quantized code sequence. Stores 4 dimensions per byte. |
+| `4` | `uint8[]` | $\lceil 2m/8 \rceil$ bytes (max 12) | **TQ Codes**: 2-bit quantized code sequence for the first $m$ rotated coordinates. Stores 4 dimensions per byte. |
 
 ### Detailed Function Specifications and Logic by Module
 
@@ -143,10 +169,11 @@ Handles the pure mathematical transformations and packing for the TQ algorithm.
 * **`void TurboQuantProject(const float *vec, int dim, float scale, uint8 *out_codes)`**
     * **Role:** Rotates and scales the input vector, then quantizes and packs it into 2-bit codes.
     * **Logic:**
-        1. Multiplies the input vector `vec` by the submatrix ($dim \times dim$) of `hnsw_tq_rotation`.
-        2. Multiplies each resulting component by the argument `scale` (usually $\sqrt{N}/\sqrt{dim}$ where $N$ = `HNSW_MAX_DIM`, or a normalization coefficient accounting for the subblock variance).
-        3. Compares each component with `hnsw_tq_centroids` and retrieves the closest index (0 to 3).
-        4. Packs the 4 indices into 1 byte (`val = (idx3 << 6) | (idx2 << 4) | (idx1 << 2) | idx0;`) and stores it in `out_codes`.
+        1. Computes $m = \min(d, \texttt{HNSW\_TQ\_MAX\_ROT\_DIMS})$.
+        2. Multiplies the input vector `vec` by the first $m$ rows (and $d$ columns) of `hnsw_tq_rotation`.
+        3. Multiplies each resulting component by the argument `scale` ($\sqrt{N}/\|\delta\|$ where $N$ = `HNSW_MAX_DIM`).
+        4. Compares each component with `hnsw_tq_centroids` and retrieves the closest index (0 to 3).
+        5. Packs the 4 indices into 1 byte (`val = (idx3 << 6) | (idx2 << 4) | (idx1 << 2) | idx0;`) and stores it in `out_codes`.
 * **`float HnswGetTQDistance(const uint8 *codes, const float *query_rot, int dim, float scale)`**
     * **Role:** Estimates the inner product/distance from the packed codes and the pre-rotated query.
     * **Logic:**
@@ -166,9 +193,9 @@ Bridges pgvector data types (`vector`, `halfvec`, etc.) with TQ operations.
 * **`void HnswEstimateVectorL2Distances(Datum query, Datum *neighbors, int num_neighbors, uint8 **metadata, float *distances, int dim)`**
     * **Role:** Batch estimates squared L2 distances against multiple candidate points during a search.
     * **Logic:**
-        1. **Query Preprocessing:** Calculates the squared L2 norm of `query` (`query_sum_of_squares`), applies the TQ rotation to `query` just once, and saves it in a temporary array `query_rot`.
+        1. **Query Preprocessing:** Calculates the squared L2 norm of `query` (`query_sum_of_squares`), applies the TQ rotation (first $m$ rows) to `query` just once, and saves it in a temporary array `query_rot[m]`.
         2. **Candidate Loop:** Loops through each candidate. Reads the stored squared norm of the candidate (`neighbor_sum_of_squares`) from the first 4 bytes of `metadata`.
-        3. **Inner Product Estimation:** Calculates `inv_scale = dim / sqrt(HNSW_MAX_DIM);`, and calls `HnswGetTQDistance` to get the estimated dot product (`estimated_dot_product`) between `query_rot` and the 2-bit codes. The divisor $d / \sqrt{N}$ compensates for two effects: (a) the encode scaling of $\sqrt{N}/\|\delta\|$ and (b) the $d \times d$ subblock of the $N \times N$ rotation capturing only $d/N$ of the true inner product.
+        3. **Inner Product Estimation:** Calculates `inv_scale = m / sqrt(HNSW_MAX_DIM);`, and calls `HnswGetTQDistance` to get the estimated dot product (`estimated_dot_product`) between `query_rot` and the 2-bit codes. The divisor $m / \sqrt{N}$ compensates for two effects: (a) the encode scaling of $\sqrt{N}/\|\delta\|$ and (b) the $m$-row subblock of the $N \times N$ rotation capturing only $m/N$ of the true inner product.
         4. **L2 Distance Calculation:** Utilizes the vector property $L2^2(q, v) = \|q\|^2 + \|v\|^2 - 2\langle q, v \rangle$ to calculate the squared L2 distance using the following formula:
            `Estimated Distance = query_sum_of_squares + neighbor_sum_of_squares - (2.0 * estimated_dot_product)`
         5. Stores the calculated estimated distances in the `distances` array.
