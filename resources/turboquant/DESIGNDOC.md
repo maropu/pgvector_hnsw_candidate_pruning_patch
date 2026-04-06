@@ -79,7 +79,7 @@ To reduce runtime computational costs, the random rotation matrix $\Pi$ is embed
     # 4. Output as a C language const float array
     # `const float hnsw_tq_rotation[2000][2000] = { ... };`
     ```
-* **Implementation Note:** Theoretically, a matrix following $\mathcal{N}(0, 1/d)$ is required, but here we output a matrix based on $\mathcal{N}(0, 1)$. The scale correction of $1/\sqrt{d}$, which depends on the dimension $d$, is applied dynamically during execution in the C code.
+* **Implementation Note:** Theoretically, a matrix following $\mathcal{N}(0, 1/d)$ is required, but here we output a matrix based on $\mathcal{N}(0, 1)$. Because the rotation matrix is $N \times N$ (where $N$ = `HNSW_MAX_DIM` = 2000), each entry has magnitude $\sim 1/\sqrt{N}$. For a $d$-dimensional input ($d \leq N$), only the top-left $d \times d$ subblock is used, so each rotated coordinate has variance $\|\delta\|^2 / N$ (not $\|\delta\|^2 / d$). The encode normalizer therefore uses $\sqrt{N}$ (not $\sqrt{d}$) to map to $\mathcal{N}(0, 1)$ before quantization. On the decode side, the partial rotation captures only $d/N$ of the true inner product, so the decode divisor is $d / \sqrt{N}$.
 
 ### Data Structure and Storage Layout
 
@@ -87,7 +87,7 @@ To reduce runtime computational costs, the random rotation matrix $\Pi$ is embed
 During index construction, the variable-length metadata size is calculated from the target vector's dimension $d$ and persisted in the metadata page.
 * **Added Field:** `uint16 neighborMetadataSize;`
 * **Calculation Logic:** `sizeof(float4) + ceil((d * 2.0) / 8.0)`
-    * For low dimensions (e.g., under 32 dimensions, below `HNSW_TQ_L2_MIN_ROT`), the pruning accuracy is unstable. Thus, TQ compression is skipped, and the logic falls back to `sizeof(float4)` (storing only exact distance upper bounds, etc.).
+    * For low dimensions (e.g., under 8 dimensions, below `HNSW_TQ_L2_MIN_DIM`), the pruning accuracy is unstable. Thus, TQ compression is skipped, and the logic falls back to `sizeof(float4)` (storing only exact distance upper bounds, etc.).
 
 **Neighbor Tuple (`HnswNeighborTupleData`)**
 Data is packed in the following layout immediately after the TID in each adjacency list entry.
@@ -108,7 +108,7 @@ Handles the pure mathematical transformations and packing for the TQ algorithm.
     * **Role:** Rotates and scales the input vector, then quantizes and packs it into 2-bit codes.
     * **Logic:**
         1. Multiplies the input vector `vec` by the submatrix ($dim \times dim$) of `hnsw_tq_rotation`.
-        2. Multiplies each resulting component by the argument `scale` (usually $1/\sqrt{dim}$ or a normalization coefficient).
+        2. Multiplies each resulting component by the argument `scale` (usually $\sqrt{N}/\sqrt{dim}$ where $N$ = `HNSW_MAX_DIM`, or a normalization coefficient accounting for the subblock variance).
         3. Compares each component with `hnsw_tq_centroids` and retrieves the closest index (0 to 3).
         4. Packs the 4 indices into 1 byte (`val = (idx3 << 6) | (idx2 << 4) | (idx1 << 2) | idx0;`) and stores it in `out_codes`.
 * **`float HnswGetTQDistance(const uint8 *codes, const float *query_rot, int dim, float scale)`**
@@ -126,13 +126,13 @@ Bridges pgvector data types (`vector`, `halfvec`, etc.) with TQ operations.
     * **Logic:**
         1. Calculates the difference vector $\delta$ between `vec` and `neighbor`.
         2. Calculates the $L2$ norm (Sum of Squares) of $\delta$ and writes it to the first 4 bytes of `metadata`.
-        3. Calls `TurboQuantProject` using $1/\sqrt{dim}$ as the scale, writing the TQ codes to the remaining bytes.
+        3. Calls `TurboQuantProject` using $\sqrt{N}/\|\delta\|$ (where $N$ = `HNSW_MAX_DIM`) as the normalization scale, writing the TQ codes to the remaining bytes. Note: the rotation matrix is $N \times N$ orthogonal, so each entry has magnitude $\sim 1/\sqrt{N}$; using $\sqrt{N}$ (not $\sqrt{d}$) ensures the quantizer input follows $\mathcal{N}(0, 1)$.
 * **`void HnswEstimateVectorL2Distances(Datum query, Datum *neighbors, int num_neighbors, uint8 **metadata, float *distances, int dim)`**
     * **Role:** Batch estimates squared L2 distances against multiple candidate points during a search.
     * **Logic:**
         1. **Query Preprocessing:** Calculates the squared L2 norm of `query` (`query_sum_of_squares`), applies the TQ rotation to `query` just once, and saves it in a temporary array `query_rot`.
         2. **Candidate Loop:** Loops through each candidate. Reads the stored squared norm of the candidate (`neighbor_sum_of_squares`) from the first 4 bytes of `metadata`.
-        3. **Inner Product Estimation:** Calculates `scale = sqrt(neighbor_sum_of_squares) / sqrt(dim);`, and calls `HnswGetTQDistance` to get the estimated dot product (`estimated_dot_product`) between `query_rot` and the 2-bit codes.
+        3. **Inner Product Estimation:** Calculates `inv_scale = dim / sqrt(HNSW_MAX_DIM);`, and calls `HnswGetTQDistance` to get the estimated dot product (`estimated_dot_product`) between `query_rot` and the 2-bit codes. The divisor $d / \sqrt{N}$ compensates for two effects: (a) the encode scaling of $\sqrt{N}/\|\delta\|$ and (b) the $d \times d$ subblock of the $N \times N$ rotation capturing only $d/N$ of the true inner product.
         4. **L2 Distance Calculation:** Utilizes the vector property $L2^2(q, v) = \|q\|^2 + \|v\|^2 - 2\langle q, v \rangle$ to calculate the squared L2 distance using the following formula:
            `Estimated Distance = query_sum_of_squares + neighbor_sum_of_squares - (2.0 * estimated_dot_product)`
         5. Stores the calculated estimated distances in the `distances` array.
