@@ -5,6 +5,7 @@ on:
     paths:
       - ".github/workflows/BuildAndTests.yml"
       - "*.patch"
+      - "*.patch.gz"
 
 env:
   PG_MAJOR: "17"
@@ -65,9 +66,14 @@ jobs:
         working-directory: /tmp/pgvector
         run: |
           set -eux
-          test -f "${GITHUB_WORKSPACE}/${{ matrix.patch_file }}"
-          echo "Applying patch: ${{ matrix.patch_file }}"
-          patch -p1 < "${GITHUB_WORKSPACE}/${{ matrix.patch_file }}"
+          PATCH="${GITHUB_WORKSPACE}/${{ matrix.patch_file }}"
+          test -f "$PATCH"
+          if [[ "$PATCH" == *.gz ]]; then
+            gunzip -k "$PATCH"
+            PATCH="${PATCH%.gz}"
+          fi
+          echo "Applying patch: $PATCH"
+          patch -p1 < "$PATCH"
 
       - name: Build & install extension
         working-directory: /tmp/pgvector
@@ -218,9 +224,14 @@ jobs:
         working-directory: /tmp/pgvector
         run: |
           set -eux
-          test -f "${GITHUB_WORKSPACE}/${{ matrix.patch_file }}"
-          echo "Applying patch: ${{ matrix.patch_file }}"
-          patch -p1 < "${GITHUB_WORKSPACE}/${{ matrix.patch_file }}"
+          PATCH="${GITHUB_WORKSPACE}/${{ matrix.patch_file }}"
+          test -f "$PATCH"
+          if [[ "$PATCH" == *.gz ]]; then
+            gunzip -k "$PATCH"
+            PATCH="${PATCH%.gz}"
+          fi
+          echo "Applying patch: $PATCH"
+          patch -p1 < "$PATCH"
 
       - name: Move under PostgreSQL contrib
         run: |

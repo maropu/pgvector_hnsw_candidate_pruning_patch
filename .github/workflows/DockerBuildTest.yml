@@ -6,6 +6,7 @@ on:
       - '.github/workflows/DockerBuildTest.yml'
       - 'dockerfiles/build/Dockerfile'
       - '*.patch'
+      - '*.patch.gz'
 
 env:
   PG_MAJOR: "17"

@@ -47,11 +47,12 @@
 #   PG_MAJOR      PostgreSQL major version.  Default: 17
 #   PGVECTOR_REF  pgvector git ref (tag or commit SHA).  Default: v0.8.0
 #   PATCH_FILE    Patch filename (must exist in the repository root).
+#                 Accepts both plain .patch and gzip-compressed .patch.gz files.
 #                 Default: pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch
 #                 Available patches (see repo root):
-#                   pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch
-#                   pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch
-#                   pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch
+#                   pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch[.gz]
+#                   pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch[.gz]
+#                   pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch[.gz]
 #
 # =============================================================================
 # BUILD EXAMPLES
@@ -144,6 +145,12 @@ COPY ${PATCH_FILE} /tmp/pgvector/
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+# --- Decompress patch if gzip-compressed ---
+RUN set -eux; \
+    if [[ "${PATCH_FILE}" == *.gz ]]; then \
+      gunzip "${PATCH_FILE}"; \
+    fi
+
 # --- Install build dependencies ---
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
@@ -162,11 +169,11 @@ WORKDIR /tmp/pgvector
 
 # --- Patch (dry-run for diagnostics) ---
 RUN set -eux; \
-    patch -p1 --forward --dry-run < "${PATCH_FILE}"
+    patch -p1 --forward --dry-run < "${PATCH_FILE%.gz}"
 
 # --- Apply patch ---
 RUN set -eux; \
-    patch -p1 --forward < "${PATCH_FILE}"
+    patch -p1 --forward < "${PATCH_FILE%.gz}"
 
 # --- Build extension ---
 RUN set -eux; \

@@ -6,16 +6,22 @@ Three approaches are maintained in parallel:
 
 | Patch file | Method |
 |---|---|
-| `pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch` | TurboQuant (random rotation + 2-bit quantization) |
+| `pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch.gz` | TurboQuant (random rotation + 2-bit quantization) |
 | `pgvector_v0.8.0_hnsw_candidate_pruning_simhash.patch` | SimHash (locality-sensitive hashing) |
 | `pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch` | Product Quantization |
+
+The TurboQuant patch contains a large precomputed rotation matrix
+(2000×2000 floats) and is gzip-compressed to save space.  The `export`
+subcommand compresses automatically when the patch exceeds 10 MiB
+(configurable via `--gz-threshold`).  All three Dockerfiles accept both
+plain `.patch` and `.patch.gz` files transparently.
 
 ---
 
 ## Repository layout
 
 ```
-pgvector_v0.8.0_hnsw_candidate_pruning_<method>.patch  # exported patch files
+pgvector_v0.8.0_hnsw_candidate_pruning_<method>.patch[.gz]  # exported patch files
 scripts/pgvector_dev.sh          # dev-dir lifecycle helper (setup / export / reset)
 dockerfiles/
   build/Dockerfile               # compile patch → /artifacts (vector.so + SQL files)
@@ -60,11 +66,23 @@ Work inside the generated working directory, e.g.:
 
 ### 3. Export changes to the patch file
 
-After editing, regenerate the `.patch` file in the repository root:
+After editing, regenerate the patch file in the repository root:
 
 ```bash
 bash scripts/pgvector_dev.sh export \
   --dir .pgvector_dev_v0.8.0_hnsw_candidate_pruning_turboquant \
+  pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch
+```
+
+If the resulting patch exceeds 10 MiB (default `--gz-threshold`), the
+`export` subcommand automatically gzip-compresses it and writes
+`<name>.patch.gz` instead.  The TurboQuant patch always exceeds this
+threshold.  To change the threshold:
+
+```bash
+bash scripts/pgvector_dev.sh export \
+  --dir .pgvector_dev_v0.8.0_hnsw_candidate_pruning_turboquant \
+  --gz-threshold 0 \
   pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch
 ```
 
@@ -84,8 +102,10 @@ bash scripts/pgvector_dev.sh reset \
 All compilation and testing must be done via Docker (do **not** run
 `make USE_PGXS=1` directly on the host).  The build context for every
 `docker build` command is the **repository root** (the directory containing
-the `.patch` file).  Build arguments, run examples, and environment variable
-references are documented in detail in the header comment of each Dockerfile.
+the `.patch` or `.patch.gz` file).  Build arguments, run examples, and
+environment variable references are documented in detail in the header comment
+of each Dockerfile.  All Dockerfiles accept both plain `.patch` and
+gzip-compressed `.patch.gz` files via the `PATCH_FILE` build argument.
 
 - **`dockerfiles/build/Dockerfile`** — Applies the patch and compiles `vector.so`;
   collects the resulting extension files under `/artifacts` inside the image.

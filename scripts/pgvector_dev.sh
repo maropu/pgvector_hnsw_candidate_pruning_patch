@@ -67,12 +67,17 @@
 #             conflicting edits).
 #       EXIT CODES: 0 on success, non-zero on any error.
 #
-#   export [--dir <dir>] <output-patch-file>
+#   export [--dir <dir>] [--gz-threshold <bytes>] <output-patch-file>
 #       REQUIRED positional: <output-patch-file>
 #           Destination path for the generated patch.  Relative paths are
 #           resolved from the current working directory.
 #       OPTIONAL: --dir <dir>  (default: .pgvector_dev)
 #           The working directory to diff.
+#       OPTIONAL: --gz-threshold <bytes>  (default: 10485760 = 10 MiB)
+#           If the generated patch exceeds this size in bytes, compress it
+#           with gzip.  The output file will have ".gz" appended (e.g.
+#           foo.patch -> foo.patch.gz).  Set to 0 to always compress, or
+#           to a very large value to effectively disable compression.
 #       BEHAVIOUR:
 #           - Captures ALL uncommitted changes: staged files, unstaged
 #             modifications, and untracked new files.
@@ -81,8 +86,10 @@
 #             immediately unstaged with `git reset HEAD` - the working tree
 #             is never altered.
 #           - Output format: unified diff with --patch --stat (compatible
-#             with `git apply`).
+#             with `git apply` / `gunzip | git apply`).
 #           - If there are no changes, writes an empty file and exits 0.
+#           - If the patch file exceeds --gz-threshold, it is gzip-compressed
+#             in place and the final filename is reported.
 #       EXIT CODES: 0 on success, non-zero on any error.
 #
 #   reset [--dir <dir>]
@@ -121,8 +128,8 @@ usage() {
   echo "Usage:"
   echo "  $0 setup  --patch <patch-file> [--tag <tag>] [--dir <dir>]"
   echo "                                Clone pgvector and apply a patch."
-  echo "  $0 export [--dir <dir>] <output-patch-file>"
-  echo "                                Export changes as a patch."
+  echo "  $0 export [--dir <dir>] [--gz-threshold <bytes>] <output-patch-file>"
+  echo "                                Export changes as a patch (auto-gzip if large)."
   echo "  $0 reset  [--dir <dir>]       Restore the working directory to its initial state."
   echo "  $0 status [--dir <dir>]       Show git status of the working directory."
   exit 1
@@ -225,7 +232,18 @@ cmd_setup() {
 # -----------------------------------------------------------------------
 
 cmd_export() {
-  parse_dir_flag "$@"; set -- "${PARSED_ARGS[@]}"
+  local gz_threshold=10485760  # 10 MiB default
+  # Parse --dir and --gz-threshold before falling through to positional args.
+  DEV_DIR="$ROOT_DIR/.pgvector_dev"   # fallback default
+  local args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir)          DEV_DIR="${2:?--dir requires a path}"; shift 2 ;;
+      --gz-threshold) gz_threshold="${2:?--gz-threshold requires a byte count}"; shift 2 ;;
+      *)              args+=("$1"); shift ;;
+    esac
+  done
+  set -- "${args[@]+"${args[@]}"}"
 
   local output="${1:-}"
   [[ -n "$output" ]] || die "export: specify an output patch file."
@@ -264,7 +282,15 @@ cmd_export() {
   fi
 
   if [[ -s "$output" ]]; then
-    info "Patch written: $output"
+    # Compress if the patch exceeds the threshold.
+    local file_size
+    file_size=$(wc -c < "$output" | tr -d ' ')
+    if [[ "$file_size" -gt "$gz_threshold" ]]; then
+      gzip -f "$output"
+      info "Patch compressed: ${output}.gz ($(du -h "${output}.gz" | cut -f1))"
+    else
+      info "Patch written: $output"
+    fi
   else
     info "Diff was empty. File created but has no content."
   fi
