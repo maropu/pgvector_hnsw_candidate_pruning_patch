@@ -39,7 +39,7 @@ def plot_results():
     plt.grid(True, which="both")
 
     # Save to file
-    plt.savefig("sift1m_recall_blocks_tradeoff.png", dpi=300, bbox_inches="tight")
+    plt.savefig("naive_turboquant_benchmark_results.png", dpi=300, bbox_inches="tight")
     plt.close()
 
 

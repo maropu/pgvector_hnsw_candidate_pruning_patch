@@ -105,7 +105,7 @@ where $\mathcal{C}(f_X, b)$ is the scalar MSE cost ($\approx 0.117$ for $b = 2$)
 **Practical benefits:**
 - **Fixed metadata size**: 16 bytes per edge regardless of input dimension, matching the SimHash patch budget.
 - **Reduced rotation cost**: $O(m \times d)$ instead of $O(d^2)$ at both build and scan time.
-- **Acceptable accuracy**: For candidate ranking (not exact distance computation), the moderate variance increase is tolerable since the top-k selection only requires correct relative ordering among the best candidates.
+- **Acceptable accuracy**: For candidate ranking (not exact distance computation), the moderate variance increase is tolerable since the top-k selection only requires correct relative ordering among the best candidates. Preliminary experiments on SIFT1M ($d = 128$) confirmed that reducing $m$ from 128 to 48 has negligible impact on recall at typical `ef_search` values. Benchmark results without dimension subsampling (i.e., $m = d = 128$) are available in `naive_turboquant_benchmark_results.png`.
 
 **Macro definitions** (in `src/hnswtq.h`):
 ```c

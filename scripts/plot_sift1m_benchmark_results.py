@@ -19,6 +19,9 @@ def plot_results():
     recall_pd_k3 = [0.740, 0.870, 0.949, 0.985, 0.994, 0.998, 1.000, 1.000]
     blocks_pd_k3 = [301.840, 424.980, 646.920, 1034.120, 1410.340, 2190.800, 4163.740, 8156.520]
 
+    recall_tq_k3 = [0.5179, 0.6671, 0.7961, 0.8911, 0.9304, 0.9638, 0.9878, 0.9967]
+    blocks_tq_k3 = [289.640, 460.140, 795.000, 1404.940, 1917.620, 2963.680, 5613.940, 10677.400]
+
     # k=5
     recall_simhash_k5 = [0.732, 0.854, 0.936, 0.980, 0.990, 0.997, 1.000, 1.000]
     blocks_simhash_k5 = [394.52, 643.32, 1063.78, 1806.14, 2653.72, 4179.56, 8030.42, 15997.70]
@@ -26,12 +29,18 @@ def plot_results():
     recall_pd_k5 = [0.788, 0.900, 0.962, 0.990, 0.996, 0.999, 1.000, 1.000]
     blocks_pd_k5 = [403.160, 570.720, 849.320, 1385.580, 1929.480, 3004.180, 5786.120, 11377.320]
 
+    recall_tq_k5 = [0.6067, 0.7456, 0.8551, 0.9301, 0.9584, 0.9809, 0.9945, 0.9988]
+    blocks_tq_k5 = [291.560, 454.280, 795.860, 1383.540, 1960.940, 2915.340, 5536.220, 10726.780]
+
     # k=7
     recall_simhash_k7 = [0.764, 0.875, 0.948, 0.984, 0.993, 0.998, 1.000, 1.000]
     blocks_simhash_k7 = [462.50, 688.54, 1169.54, 2068.12, 2972.98, 4609.88, 9082.54, 17866.02]
 
     recall_pd_k7 = [0.807, 0.909, 0.967, 0.991, 0.996, 0.999, 1.000, 1.000]
     blocks_pd_k7 = [489.300, 703.500, 1057.400, 1743.420, 2431.960, 3838.760, 7419.400, 14603.820]
+
+    recall_tq_k7 = [0.6582, 0.7883, 0.8861, 0.9499, 0.9717, 0.9879, 0.9967, 0.9993]
+    blocks_tq_k7 = [284.220, 462.960, 805.300, 1422.280, 1918.880, 3013.520, 5534.680, 10695.900]
 
     # Plot results
     plt.plot(recall_vanilla, blocks_vanilla, marker='s', color="black", linewidth=2, label="vanilla pgvector")
@@ -42,6 +51,9 @@ def plot_results():
     plt.plot(recall_pd_k3, blocks_pd_k3, marker='v', color="#A50F15", label="w/PQ (k=3)", linewidth=1.8, markersize=7)
     plt.plot(recall_pd_k5, blocks_pd_k5, marker='^', color="#DE2D26", label="w/PQ (k=5)", linewidth=1.8, markersize=7)
     plt.plot(recall_pd_k7, blocks_pd_k7, marker='o', color="#FB6A4A", label="w/PQ (k=7)", linewidth=1.8, markersize=7)
+    plt.plot(recall_tq_k3, blocks_tq_k3, marker='v', color="#006D2C", label="w/TurboQuant (k=3)", linewidth=1.8, markersize=7)
+    plt.plot(recall_tq_k5, blocks_tq_k5, marker='^', color="#238B45", label="w/TurboQuant (k=5)", linewidth=1.8, markersize=7)
+    plt.plot(recall_tq_k7, blocks_tq_k7, marker='o', color="#74C476", label="w/TurboQuant (k=7)", linewidth=1.8, markersize=7)
 
     plt.xlabel("Recall")
     plt.ylabel("#Blocks")

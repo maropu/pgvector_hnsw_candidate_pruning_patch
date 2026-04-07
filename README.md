@@ -13,7 +13,7 @@ The search algorithm proposed in the HNSW paper [1] proceeds greedily: for a ver
 between all of its adjacent candidate vectices and the query, then iteratively moves to the neighbor that most reduces the distance to the query.
 In pgvector, which follows the PASE’s design, these adjacent vertices are often located on different blocks, leading to frequent random block accesses during search.
 This becomes a major issue in an RDBMS, where sophisticated concurrency control for transaction processing makes both I/O overhead and lock contention critical concerns.
-To mitigate this, the work provides two alternative patches that embed per-neighbor metadata into each vertex and use it to estimate distances to the query
+To mitigate this, the work provides three alternative patches that embed per-neighbor metadata into each vertex and use it to estimate distances to the query
 without reading the blocks containing those neighbors. Neighbors of the current vertex are first ranked by an estimated distance $\hat d(q,n)$,
 and only the top-k are fetched to compute exact distances; this reduces random I/O and contention while preserving accuracy.
 This strategy is well known in earlier work as two-level search with hybrid distance [4] or re-ranking [6,7,8,9].
@@ -30,6 +30,13 @@ At query time, the PQ code is simply decoded: for each part $j$ we read the corr
 The estimated distance is then $\hat{d}(q,n) = \| q - \tilde{n} \|$.
 Neighbors are ranked by $\hat{d}(q,n)$ and, as in the first patch, only the top-k are fetched to compute exact distances.
 Compared to SimHash, PQ offers stronger estimation at the cost of build-time training and additional storage for codebooks.
+
+The third patch uses TurboQuant (TQ) [10], an MSE-optimized online vector quantizer. Each edge stores 16 bytes of per-neighbor metadata:
+4 bytes for the edge length $\|\Delta\|$ and 12 bytes of 2-bit quantized codes for up to $m = \min(d, 48)$ rotated coordinates of the edge vector $\Delta = (n - c)$.
+During index construction, $\Delta$ is multiplied by a pre-computed random orthogonal matrix $\Pi$ and each rotated coordinate is scalar-quantized to 2 bits using Lloyd-Max centroids.
+At query time, the query offset $v = (q - c)$ is likewise rotated, and the inner product $\langle v, \Delta \rangle$ is estimated from the quantized codes to derive an estimated $L_2$ distance $\hat d(q,n)$.
+When $d > 48$, dimension subsampling is applied: only the first 48 rows of $\Pi$ are used, acting as a random projection that mixes all $d$ input dimensions into 48 rotated coordinates.
+This design is training-free, compact (fixed 16 bytes per edge regardless of dimension), and its MSE bias conservatively overestimates distances, preserving recall.
 
 Apply the patches to pgvector and compile them as described below:
 
@@ -56,7 +63,13 @@ $ patch -p1 < pgvector_v0.8.0_hnsw_candidate_pruning_pq.patch
 $ make
 $ make install
 ```
-
+The TurboQuant-based patch:
+```shell
+// Compile and install pgvector w/the TurboQuant-based patch
+$ gunzip -c pgvector_v0.8.0_hnsw_candidate_pruning_turboquant.patch.gz | patch -p1
+$ make
+$ make install
+```
 Note that **these patches are incompatible with the pgvector’s original index data format** because they adds 16 bytes per-neighbor metadata, and
 they currently support only the L2 distance (vector_l2_ops) on single-precision floating-point vectors.
 
@@ -87,18 +100,24 @@ A higher value provides better recall at the cost of block accesses.
 
 ## Benchmark results
 
-This experiment compares vanilla pgvector with the two candidate-pruning variants (SimHash-based and PQ-based) on [SIFT1M](http://corpus-texmex.irisa.fr/) 10-NN,
+This experiment compares vanilla pgvector with the three candidate-pruning variants (SimHash-based, PQ-based, and TurboQuant-based) on [SIFT1M](http://corpus-texmex.irisa.fr/) 10-NN,
 using the number of block accesses required to keep target recall levels as the metric. The evaluation uses HNSW parameters m=24 and ef_construction=200.
-As shown in the figure below, around recall=0.95, the SimHash-based variant reduces block accesses by approximately 52% (k=3), 69% (k=5), and 66% (k=7) relative to the vanilla one,
-whereas the PQ-based variant achieves stronger reductions of approximately 81% (k=3), 75% (k=5), and 69% (k=7).
-At recall=1.0, the SimHash one yields about 72% (k=3), 68% (k=5), and 64% (k=7) fewer block accesses,
-while the PQ one achieves about 84% (k=3), 77% (k=5), and 71% (k=7). Therefore, these results indicate that both patches provide a consistent reduction
-in block read while maintaining accuracy, with the benefits observed in the higher-recall regime.
+The figure below plots the recall vs. block-access tradeoff for each variant at k=3, 5, and 7.
+
+Around recall=0.95, PQ achieves the largest block-access reductions of approximately 81% (k=3), 75% (k=5), and 69% (k=7) relative to vanilla pgvector.
+SimHash reduces block accesses by approximately 52% (k=3), 69% (k=5), and 66% (k=7),
+while TurboQuant yields reductions of approximately 14% (k=3), 43% (k=5), and 59% (k=7).
+At the highest recall each variant reaches (1.0 for SimHash and PQ, and approximately 0.997–0.999 for TurboQuant),
+PQ again leads with about 84% (k=3), 77% (k=5), and 71% (k=7) fewer block accesses,
+followed by TurboQuant at about 79% across all k values,
+and SimHash at about 72% (k=3), 68% (k=5), and 64% (k=7).
+Overall, PQ delivers the strongest block reduction across all recall levels and k values.
+SimHash and TurboQuant are both training-free; SimHash achieves higher recall at lower k, while TurboQuant provides more uniform block savings across k values in the high-recall regime.
 
 <img src="resources/sift1m_recall_blocks_tradeoff.png" width="600">
 
 A limitation of this design is **the increase in index size due to per‑neighbor metadata**.
-On SIFT1M, the vanilla pgvector index occupies 781 MiB, whereas enabling the 16‑byte neighbor metadata inflates the index to 1313 MiB for both patches,
+On SIFT1M, the vanilla pgvector index occupies 781 MiB, whereas enabling the 16‑byte neighbor metadata inflates the index to 1313 MiB for all three patches,
 corresponding to an increase of approximately 68%. Addressing this storage overhead remains an important direction for future work.
 
 ## TODO
@@ -107,6 +126,7 @@ corresponding to an increase of approximately 68%. Addressing this storage overh
    - For follow-up work to tackle this issue, see https://github.com/maropu/pgvector_hnsw_two_stage_pq_patch
  - Improve the patches to further reduce the number of block accesses
  - Add benchmark results showing the recall-TPS (transactions per second) tradeoff and include them in the section "Benchmark results"
+ - Add benchmark results on higher-dimensional datasets, as TurboQuant's algorithm is designed for high-dimensional spaces and may show stronger gains beyond SIFT1M's 128 dimensions
 
 ## References
 
@@ -119,3 +139,4 @@ corresponding to an increase of approximately 68%. Addressing this storage overh
  - [7] Hervé Jégou, Romain Tavenard, Matthijs Douze, and Laurent Amsaleg. 2011. Searching in one billion vectors: Re-rank with source coding. In Proceedings of the 2011 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP 2011). IEEE, 861–864. https://doi.org/10.1109/ICASSP.2011.5946540.
  - [8] Herve Jégou, Matthijs Douze, and Cordelia Schmid. 2011. Product Quantization for Nearest Neighbor Search. IEEE Transactions on Pattern Analysis and Machine Intelligence 33, 1 (2011), 117–128. https://doi.org/10.1109/TPAMI.2010.57.
  - [9] Bing Tian, Haikun Liu, Yuhang Tang, Shihai Xiao, Zhuohui Duan, Xiaofei Liao, Hai Jin, Xuecang Zhang, Junhua Zhu, and Yu Zhang. 2025. Towards high-throughput and low-latency billion-scale vector search via CPU/GPU collaborative filtering and re-ranking. In Proceedings of the 23rd USENIX Conference on File and Storage Technologies (FAST '25). USENIX Association, USA, Article 11, 171–185.
+ - [10] Amir Zandieh, Majid Daliri, Vahab Mirrokni, and Majid Hadian. 2025. TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate. arXiv preprint arXiv:2504.19874.
