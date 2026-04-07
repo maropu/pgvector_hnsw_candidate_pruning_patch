@@ -113,7 +113,7 @@ where $\mathcal{C}(f_X, b)$ is the scalar MSE cost ($\approx 0.117$ for $b = 2$)
 #define HNSW_TQ_MAX_ROT_DIMS   ((HNSW_TQ_CODE_BYTES * 8) / HNSW_TQ_BIT_WIDTH)           /* 48 */
 ```
 
-All encode/decode paths use $m = \min(d,\, \texttt{HNSW\_TQ\_MAX\_ROT\_DIMS})$ as the effective number of rotated coordinates, and the decode divisor is $m / \sqrt{N}$ (not $d / \sqrt{N}$).
+All encode/decode paths use $m = \min(d,\, \mathtt{HNSW\_TQ\_MAX\_ROT\_DIMS})$ as the effective number of rotated coordinates, and the decode divisor is $m / \sqrt{N}$ (not $d / \sqrt{N}$).
 
 ### Generation of Compile-time Constants (Python Script Specification)
 To reduce runtime computational costs, the random rotation matrix $\Pi$ is embedded as a compile-time constant in `src/hnswtq.c`. The script specifications for regeneration are as follows:
@@ -140,14 +140,14 @@ To reduce runtime computational costs, the random rotation matrix $\Pi$ is embed
     # 4. Output as a C language const float array
     # `const float hnsw_tq_rotation[2000][2000] = { ... };`
     ```
-* **Implementation Note:** Theoretically, a matrix following $\mathcal{N}(0, 1/d)$ is required, but here we output a matrix based on $\mathcal{N}(0, 1)$. Because the rotation matrix is $N \times N$ (where $N$ = `HNSW_MAX_DIM` = 2000), each entry has magnitude $\sim 1/\sqrt{N}$. For a $d$-dimensional input ($d \leq N$), only the first $m = \min(d, \texttt{HNSW\_TQ\_MAX\_ROT\_DIMS})$ rows and $d$ columns are used (dimension subsampling), so each rotated coordinate has variance $\|\delta\|^2 / N$ (not $\|\delta\|^2 / d$). The encode normalizer uses $\sqrt{N}$ (not $\sqrt{d}$) to map to $\mathcal{N}(0, 1)$ before quantization. On the decode side, the $m$-row partial rotation captures only $m/N$ of the true inner product, so the decode divisor is $m / \sqrt{N}$.
+* **Implementation Note:** Theoretically, a matrix following $\mathcal{N}(0, 1/d)$ is required, but here we output a matrix based on $\mathcal{N}(0, 1)$. Because the rotation matrix is $N \times N$ (where $N$ = `HNSW_MAX_DIM` = 2000), each entry has magnitude $\sim 1/\sqrt{N}$. For a $d$-dimensional input ($d \leq N$), only the first $m = \min(d, \mathtt{HNSW\_TQ\_MAX\_ROT\_DIMS})$ rows and $d$ columns are used (dimension subsampling), so each rotated coordinate has variance $\|\delta\|^2 / N$ (not $\|\delta\|^2 / d$). The encode normalizer uses $\sqrt{N}$ (not $\sqrt{d}$) to map to $\mathcal{N}(0, 1)$ before quantization. On the decode side, the $m$-row partial rotation captures only $m/N$ of the true inner product, so the decode divisor is $m / \sqrt{N}$.
 
 ### Data Structure and Storage Layout
 
 **Metadata Page (`HnswMetaPageData`)**
 During index construction, the variable-length metadata size is calculated from the target vector's dimension $d$ and persisted in the metadata page.
 * **Added Field:** `uint16 neighborMetadataSize;`
-* **Calculation Logic:** `sizeof(float4) + ceil((m * 2.0) / 8.0)` where $m = \min(d, \texttt{HNSW\_TQ\_MAX\_ROT\_DIMS})$.
+* **Calculation Logic:** `sizeof(float4) + ceil((m * 2.0) / 8.0)` where $m = \min(d, \mathtt{HNSW\_TQ\_MAX\_ROT\_DIMS})$.
     * The metadata size is capped at `HNSW_NEIGHBOR_METADATA_MAX_BYTES` (16 bytes) regardless of input dimension.
     * For low dimensions (e.g., under 8 dimensions, below `HNSW_TQ_L2_MIN_DIM`), the pruning accuracy is unstable. Thus, TQ compression is skipped, and the logic falls back to `sizeof(float4)` (storing only exact distance upper bounds, etc.).
 
@@ -169,7 +169,7 @@ Handles the pure mathematical transformations and packing for the TQ algorithm.
 * **`void TurboQuantProject(const float *vec, int dim, float scale, uint8 *out_codes)`**
     * **Role:** Rotates and scales the input vector, then quantizes and packs it into 2-bit codes.
     * **Logic:**
-        1. Computes $m = \min(d, \texttt{HNSW\_TQ\_MAX\_ROT\_DIMS})$.
+        1. Computes $m = \min(d, \mathtt{HNSW\_TQ\_MAX\_ROT\_DIMS})$.
         2. Multiplies the input vector `vec` by the first $m$ rows (and $d$ columns) of `hnsw_tq_rotation`.
         3. Multiplies each resulting component by the argument `scale` ($\sqrt{N}/\|\delta\|$ where $N$ = `HNSW_MAX_DIM`).
         4. Compares each component with `hnsw_tq_centroids` and retrieves the closest index (0 to 3).
